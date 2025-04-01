@@ -50,6 +50,7 @@ function readCsvFiles() {
       
       let allProducts = [];
       let completedFiles = 0;
+      let abstractIdCounts = {}; // To track counts of each abstract ID
       
       for (const file of csvFiles) {
         const filePath = path.join(DATA_DIR, file);
@@ -58,14 +59,61 @@ function readCsvFiles() {
         createReadStream(filePath)
           .pipe(csv())
           .on('data', (data) => {
-            // Adjust field mapping based on your CSV structure
-            // This assumes your CSV has columns like id, itemId, name, priority, etc.
+            // Log column names from the first row to help with debugging
+            if (fileProducts.length === 0) {
+              console.log(`CSV column names in ${file}:`, Object.keys(data));
+            }
+            
+            // Get Abstract Product ID from item.abstract_product_id
+            let productId = data['item.abstract_product_id'] || null;
+            
+            // If we couldn't find it directly, try alternative field names
+            if (!productId) {
+              if (data.item && data.item.abstract_product_id) {
+                productId = data.item.abstract_product_id;
+              } else if (data.abstract_product_id) {
+                productId = data.abstract_product_id;
+              } else if (data.AbstractID) {
+                productId = data.AbstractID;
+              } else if (data['Abstract ID']) {
+                productId = data['Abstract ID'];
+              } else if (data.abstract_id) {
+                productId = data.abstract_id;
+              }
+            }
+            
+            // If no ID found, generate a UUID
+            if (!productId) {
+              productId = uuidv4().substring(0, 12).toUpperCase();
+              console.log(`Generated ID ${productId} for product because no abstract_product_id found`);
+            }
+            
+            // Track counts of each abstract ID
+            abstractIdCounts[productId] = (abstractIdCounts[productId] || 0) + 1;
+            
+            // Get priority from rule.priority
+            const priority = data['rule.priority'] || data.priority || 'P3';
+            
+            // Get tenant ID
+            const tenantId = data.tenant_id || data.TenantID || data['Tenant ID'] || '';
+            
+            // Get created date from sys_created_on
+            const createdOn = data.sys_created_on || data.created_on || data.CreatedOn || 
+                             new Date().toISOString().replace('T', ' ').substring(0, 19);
+            
+            // Get item name for reference
+            const name = data.ItemName || data.Name || data.name || data.Description || 'Unknown Product';
+            
+            // Get item ID for reference
+            const itemId = parseInt(data.ItemID || data.item_id || 0);
+            
             const product = {
-              id: data.id || uuidv4().substring(0, 12).toUpperCase(),
-              itemId: parseInt(data.itemId || data.item_id || 0),
-              name: data.name || data.product_name || data.description || 'Unknown Product',
-              priority: data.priority || 'P3',
-              createdOn: data.createdOn || data.created_on || new Date().toISOString().replace('T', ' ').substring(0, 19),
+              id: productId,
+              itemId: itemId,
+              name: name,
+              priority: priority,
+              createdOn: createdOn,
+              tenantId: tenantId,
               assigned: false
             };
             fileProducts.push(product);
@@ -76,6 +124,11 @@ function readCsvFiles() {
             completedFiles++;
             
             if (completedFiles === csvFiles.length) {
+              // Add count to each product
+              allProducts.forEach(product => {
+                product.count = abstractIdCounts[product.id] || 1;
+              });
+              
               console.log(`Total products loaded from CSVs: ${allProducts.length}`);
               resolve(allProducts);
             }
@@ -105,6 +158,9 @@ async function readRosterExcel() {
     
     const workbook = xlsx.readFile(ROSTER_EXCEL);
     
+    // Log all sheet names for debugging
+    console.log('Excel sheet names:', workbook.SheetNames);
+    
     // Look for a sheet named "Agents List", or use the first sheet if not found
     let sheetName = "Agents List";
     if (!workbook.SheetNames.includes(sheetName)) {
@@ -130,27 +186,45 @@ async function readRosterExcel() {
     
     // Get the range of the worksheet
     const range = xlsx.utils.decode_range(worksheet['!ref']);
+    
+    // Log the first few cells to understand the structure
+    console.log('Analyzing Excel sheet structure:');
+    for (let c = 0; c <= Math.min(range.e.c, 10); c++) {
+      const headerRef = xlsx.utils.encode_cell({ r: 0, c: c });
+      const headerCell = worksheet[headerRef];
+      if (headerCell) {
+        console.log(`Column ${String.fromCharCode(65 + c)} (${c}): ${headerCell.v}`);
+      }
+    }
+    
     const agentsList = [];
     
+    // Skip the first row (index 0) to avoid the header "Trimmed Zoho Name"
     // Loop through rows and extract names from column E (which is index 4)
-    // Start from row 1 (index 0) or adjust as needed depending on headers
-    for (let row = 0; row <= range.e.r; row++) {
+    // Start from row 2 (index 1) to skip the header
+    for (let row = 1; row <= range.e.r; row++) {
       const cellRef = xlsx.utils.encode_cell({ r: row, c: 4 }); // Column E (index 4)
       const cell = worksheet[cellRef];
       
       // Check if cell exists and has a value
       if (cell && cell.v && typeof cell.v === 'string' && cell.v.trim() !== '') {
-        agentsList.push({
-          id: agentsList.length + 1,
-          name: cell.v.trim(),
-          role: "Item Review",
-          capacity: 10,
-          currentAssignments: []
-        });
+        // Check if the value isn't the header (double check)
+        const name = cell.v.trim();
+        if (name.toLowerCase() !== 'trimmed zoho name' && 
+            name.toLowerCase() !== 'name' &&
+            name.toLowerCase() !== 'agent name') {
+          agentsList.push({
+            id: agentsList.length + 1,
+            name: name,
+            role: "Item Review",
+            capacity: 10,
+            currentAssignments: []
+          });
+        }
       }
     }
     
-    console.log(`Read ${agentsList.length} agents from Excel roster (column E)`);
+    console.log(`Read ${agentsList.length} agents from Excel roster (column E, skipping header)`);
     return agentsList;
   } catch (error) {
     console.error('Error reading Excel roster:', error);
@@ -193,7 +267,7 @@ async function loadData() {
         agents = [
           { id: 1, name: "Aaron Dale Yaeso Bandong", role: "Item Review", capacity: 10, currentAssignments: [] },
           { id: 2, name: "Aaron Marx Lenin Tuban Oriola", role: "Item Review", capacity: 10, currentAssignments: [] },
-          // More sample agents...
+          // Add more sample agents if needed
         ];
         await saveAgents();
       }
@@ -221,12 +295,14 @@ async function loadData() {
           const priority = i % 3 === 0 ? "P1" : (i % 3 === 1 ? "P2" : "P3");
           const itemId = 15847610000 + i;
           products.push({
-            id: uuidv4().substring(0, 12).toUpperCase(),
+            id: `SAMPLE${i.toString().padStart(5, '0')}`,
             itemId,
             name: `Sample Product ${i+1} - ${["Sweater", "Jeans", "T-Shirt", "Jacket", "Dress"][i % 5]} Item`,
             priority,
+            tenantId: `TENANT${i % 3 + 1}`,
             createdOn: new Date().toISOString().replace('T', ' ').substring(0, 19),
-            assigned: false
+            assigned: false,
+            count: Math.floor(Math.random() * 5) + 1 // Random count 1-5 for sample data
           });
         }
         await saveProducts();
@@ -267,7 +343,10 @@ function updateAgentAssignments() {
       agent.currentAssignments.push({
         productId: product.id,
         name: product.name,
-        priority: product.priority
+        priority: product.priority,
+        tenantId: product.tenantId,
+        createdOn: product.createdOn,
+        count: product.count || 1
       });
     }
   });
@@ -372,11 +451,14 @@ app.post('/api/assign', async (req, res) => {
     
     assignments.push(assignment);
     
-    // Update agent's current assignments
+    // Update agent's current assignments - include additional fields
     agent.currentAssignments.push({
       productId: productToAssign.id,
       name: productToAssign.name,
-      priority: productToAssign.priority
+      priority: productToAssign.priority,
+      tenantId: productToAssign.tenantId,
+      createdOn: productToAssign.createdOn,
+      count: productToAssign.count || 1
     });
     
     // Save changes
