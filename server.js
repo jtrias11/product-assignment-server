@@ -1,13 +1,6 @@
 /***************************************************************
- * server.js - Final Script
- * 
- * Loads agents from Excel roster (column E), 
- * loads products from the "data output.csv" file
- * (columns: item.abstract_product_id, abstract_product_id, 
- *  rule_priority, tenant_id, oldest_created_on, count),
- * and provides endpoints to refresh data, assign tasks, etc.
+ * server.js - Final Script with Corrected OUTPUT_CSV Path
  ***************************************************************/
-
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
@@ -16,6 +9,7 @@ const path = require('path');
 const csvParser = require('csv-parser');
 const xlsx = require('xlsx');
 const { createReadStream } = require('fs');
+const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -38,12 +32,9 @@ const DATA_DIR = path.join(__dirname, 'data');
 const AGENTS_FILE = path.join(DATA_DIR, 'agents.json');
 const ASSIGNMENTS_FILE = path.join(DATA_DIR, 'assignments.json');
 
-// The final output CSV that your Python script generates
-// with columns: item.abstract_product_id, abstract_product_id, rule_priority, 
-// tenant_id, oldest_created_on, count
-const OUTPUT_CSV = path.join(__dirname, 'data output.csv');
+// Update the OUTPUT_CSV path to look inside the data folder:
+const OUTPUT_CSV = path.join(DATA_DIR, 'data output.csv');
 
-// The roster Excel file for agents
 const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
 
 // ------------------------------
@@ -67,15 +58,13 @@ async function fileExists(filePath) {
   }
 }
 
-// Reads products from the output CSV
-// We'll ignore "item.abstract_product_id" and use "abstract_product_id" as the main ID.
+// Reads products from the output CSV file and logs debug info
 function readOutputCsv() {
   return new Promise((resolve) => {
     let results = [];
-
+    console.log(`Looking for output CSV at: ${OUTPUT_CSV}`);
     fs.access(OUTPUT_CSV)
       .then(() => {
-        console.log(`Reading products from output CSV at: ${OUTPUT_CSV}`);
         createReadStream(OUTPUT_CSV)
           .pipe(csvParser())
           .on('data', (row) => {
@@ -137,9 +126,9 @@ async function readRosterExcel() {
     }
     
     const agentsList = [];
-    // We read column E (index 4) ignoring blank cells
+    // Read column E (index 4) ignoring blanks
     for (let row = 1; row <= range.e.r; row++) {
-      const cellRef = xlsx.utils.encode_cell({ r: row, c: 4 }); // column E
+      const cellRef = xlsx.utils.encode_cell({ r: row, c: 4 });
       const cell = worksheet[cellRef];
       if (cell && cell.v && typeof cell.v === 'string') {
         const name = cell.v.trim();
@@ -169,8 +158,8 @@ async function readRosterExcel() {
 async function loadData() {
   try {
     await ensureDataDir();
-    
-    // 1. Load agents from agents.json or fallback to Excel
+
+    // Load agents from JSON or fallback to Excel
     try {
       const agentsData = await fs.readFile(AGENTS_FILE, 'utf8');
       agents = JSON.parse(agentsData);
@@ -190,30 +179,26 @@ async function loadData() {
         await saveAgents();
       }
     }
-    
-    // 2. Load products from the output CSV
+
+    // Load products from the output CSV
     try {
       const csvRows = await readOutputCsv();
-      // The CSV has columns: 
-      //   item.abstract_product_id, abstract_product_id, rule_priority, tenant_id, oldest_created_on, count
-      // We'll ignore item.abstract_product_id and read abstract_product_id as the main ID.
-      products = csvRows.map((row) => ({
-        // Use the 'abstract_product_id' column for the unique ID
+      products = csvRows.map(row => ({
         id: row.abstract_product_id,
-        name: "",  // You can store a real name if needed
+        name: "", // Set a default; update if you have a name column
         priority: row.rule_priority,
         tenantId: row.tenant_id,
         createdOn: row.oldest_created_on,
         count: row.count,
         assigned: false
       }));
-      console.log(`Products loaded from output CSV: ${products.length}`);
+      console.log(`Loaded ${products.length} products from output CSV`);
     } catch (error) {
       console.log('Error loading products from output CSV:', error);
       products = [];
     }
-    
-    // 3. Load assignments from file or fallback
+
+    // Load assignments from file
     try {
       const assignmentsData = await fs.readFile(ASSIGNMENTS_FILE, 'utf8');
       assignments = JSON.parse(assignmentsData);
@@ -229,14 +214,10 @@ async function loadData() {
   }
 }
 
-// Update each agent's currentAssignments array based on assignments
 function updateAgentAssignments() {
-  // Clear existing
   agents.forEach(agent => {
     agent.currentAssignments = [];
   });
-  
-  // For each assignment, link it to the correct agent and product
   assignments.forEach(assignment => {
     const agent = agents.find(a => a.id === assignment.agentId);
     const product = products.find(p => p.id === assignment.productId);
@@ -278,28 +259,23 @@ async function saveAssignments() {
 // ------------------------------
 // API Routes
 // ------------------------------
-
-// Health Check
 app.get('/', (req, res) => {
   res.send('Product Assignment Server is running');
 });
 
-// Return all agents
 app.get('/api/agents', (req, res) => {
   res.json(agents);
 });
 
-// Return all products
 app.get('/api/products', (req, res) => {
   res.json(products);
 });
 
-// Return all assignments
 app.get('/api/assignments', (req, res) => {
   res.json(assignments);
 });
 
-// Refresh endpoint - re-read data from Excel roster and output CSV
+// Refresh endpoint: re-read data from the output CSV and roster Excel
 app.post('/api/refresh', async (req, res) => {
   try {
     await loadData();
@@ -311,14 +287,13 @@ app.post('/api/refresh', async (req, res) => {
   }
 });
 
-// Assign a product to an agent
+// Assign endpoint example
 let assignmentInProgress = false;
 app.post('/api/assign', async (req, res) => {
   if (assignmentInProgress) {
     return res.status(409).json({ error: 'Another assignment is in progress, please try again later' });
   }
   assignmentInProgress = true;
-  
   try {
     const { agentId } = req.body;
     if (!agentId) {
@@ -334,28 +309,21 @@ app.post('/api/assign', async (req, res) => {
       assignmentInProgress = false;
       return res.status(400).json({ error: 'Agent has reached maximum capacity' });
     }
-    
-    // Gather all assigned product IDs
     const assignedProductIds = new Set();
     agents.forEach(a => {
       a.currentAssignments.forEach(task => {
         assignedProductIds.add(task.productId);
       });
     });
-    
-    // Filter products that are not assigned
     const availableProducts = products
       .filter(p => !p.assigned && !assignedProductIds.has(p.id))
       .sort((a, b) => new Date(a.createdOn) - new Date(b.createdOn)); // oldest first
-    
     if (availableProducts.length === 0) {
       assignmentInProgress = false;
       return res.status(404).json({ error: 'No available products to assign' });
     }
-    
     const productToAssign = availableProducts[0];
     productToAssign.assigned = true;
-    
     const assignment = {
       id: uuidv4(),
       agentId: agent.id,
@@ -363,7 +331,6 @@ app.post('/api/assign', async (req, res) => {
       assignedOn: new Date().toISOString().replace('T', ' ').substring(0, 19)
     };
     assignments.push(assignment);
-    
     agent.currentAssignments.push({
       productId: productToAssign.id,
       name: productToAssign.name,
@@ -373,9 +340,7 @@ app.post('/api/assign', async (req, res) => {
       count: productToAssign.count || 1,
       assignmentId: assignment.id
     });
-    
     console.log(`Assigned product ID ${productToAssign.id} to agent ${agent.name}`);
-    
     await saveAssignments();
     await saveAgents();
     assignmentInProgress = false;
@@ -390,47 +355,9 @@ app.post('/api/assign', async (req, res) => {
   }
 });
 
-// Example: complete a product
-app.post('/api/complete', async (req, res) => {
-  try {
-    const { agentId, productId } = req.body;
-    if (!agentId || !productId) {
-      return res.status(400).json({ error: 'Agent ID and Product ID are required' });
-    }
-    
-    const agent = agents.find(a => a.id === agentId);
-    if (!agent) {
-      return res.status(404).json({ error: 'Agent not found' });
-    }
-    
-    const assignmentIndex = assignments.findIndex(a => a.agentId === agentId && a.productId === productId);
-    if (assignmentIndex === -1) {
-      return res.status(404).json({ error: 'Assignment not found' });
-    }
-    assignments.splice(assignmentIndex, 1);
-    
-    agent.currentAssignments = agent.currentAssignments.filter(task => task.productId !== productId);
-    
-    const productsWithThisId = products.filter(p => p.id === productId);
-    productsWithThisId.forEach(product => {
-      product.assigned = false;
-      product.completed = true;
-    });
-    
-    console.log(`Completed product ID ${productId} by agent ${agent.name}`);
-    await saveAssignments();
-    await saveAgents();
-    
-    res.status(200).json({ message: `Task ${productId} completed by ${agent.name}` });
-  } catch (error) {
-    console.error('Error completing task:', error);
-    res.status(500).json({ error: `Server error: ${error.message}` });
-  }
-});
-
-// (Add your unassign-all, unassign-agent, etc. endpoints as needed.)
-
-// Start the server
+// ------------------------------
+// Start the Server
+// ------------------------------
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
   await loadData();
