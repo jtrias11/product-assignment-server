@@ -7,27 +7,34 @@ const XLSX = require('xlsx');
 
 const app = express();
 
-// Configure CORS for all environments
+// Configure CORS for development and production
 app.use(cors({
-  origin: '*', // Adjust in production
+  origin: [
+    'http://localhost:3000',  // Local React frontend
+    'https://your-frontend-domain.com',  // Production frontend URL
+    '*'  // Be cautious with this in production
+  ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
 }));
 app.use(express.json());
 
-// Use environment variables for configuration
-const PRODUCT_DIRECTORY = process.env.PRODUCT_DIRECTORY || './data';
-const ROSTER_FILE_PATH = process.env.ROSTER_FILE_PATH || './data/Walmart_BH_Roster.xlsx';
+// Flexible directory configuration
+const PRODUCT_DIRECTORY = process.env.PRODUCT_DIRECTORY || path.join(__dirname, 'data');
+const ROSTER_FILE_PATH = process.env.ROSTER_FILE_PATH || path.join(__dirname, 'data', 'Walmart_BH_Roster.xlsx');
 
 // Ensure data directory exists
 fs.mkdirpSync(PRODUCT_DIRECTORY);
 
-// Rest of your server.js code remains the same
+// In-memory storage (would use a database in production)
+let products = [];
+let agents = [];
+let assignments = [];
 
 // Function to load products from CSV
 async function loadProductsFromCSV() {
   try {
     // Get list of CSV files
-    const files = await fs.readdir(productDirectory);
+    const files = await fs.readdir(PRODUCT_DIRECTORY);
     const csvFiles = files.filter(file => file.toLowerCase().endsWith('.csv'));
     
     if (csvFiles.length === 0) {
@@ -39,7 +46,7 @@ async function loadProductsFromCSV() {
     const allProducts = [];
     
     for (const file of csvFiles) {
-      const filePath = path.join(productDirectory, file);
+      const filePath = path.join(PRODUCT_DIRECTORY, file);
       console.log(`Processing file: ${file}`);
       
       // Process each CSV file
@@ -92,15 +99,15 @@ async function loadProductsFromCSV() {
 // Function to load agents from Excel
 async function loadAgentsFromExcel() {
   try {
-    if (!await fs.exists(rosterFilePath)) {
+    if (!await fs.exists(ROSTER_FILE_PATH)) {
       console.log('Roster file not found');
       return [];
     }
     
-    console.log(`Processing roster file: ${rosterFilePath}`);
+    console.log(`Processing roster file: ${ROSTER_FILE_PATH}`);
     
     // Read the Excel file
-    const workbook = XLSX.readFile(rosterFilePath);
+    const workbook = XLSX.readFile(ROSTER_FILE_PATH);
     
     // Check if "Agents List" sheet exists
     if (!workbook.SheetNames.includes('Agents List')) {
@@ -177,13 +184,14 @@ app.post('/api/refresh-data', async (req, res) => {
   }
 });
 
-// Assignment and completion endpoints remain the same as in previous implementation
+// Add assignment and completion endpoints here (from previous implementation)
 
 // Root endpoint for health check
 app.get('/', (req, res) => {
   res.json({
     status: 'Server is running',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 
@@ -196,12 +204,15 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Dynamic port for Heroku
+// Flexible port configuration
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '0.0.0.0';
 
 // Start the server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+const server = app.listen(PORT, HOST, () => {
+  console.log(`Server running on:`);
+  console.log(`- http://localhost:${PORT}`);
+  console.log(`- http://${HOST}:${PORT}`);
 });
 
-module.exports = app; // For potential testing
+module.exports = { app, server }; // Export for potential testing
