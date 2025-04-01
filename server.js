@@ -54,6 +54,7 @@ function readCsvFiles() {
       let allProducts = [];
       let completedFiles = 0;
       let abstractIdCounts = {}; // To track counts of each abstract ID
+      let skippedRows = 0; // To track how many rows were skipped
       
       for (const file of csvFiles) {
         const filePath = path.join(DATA_DIR, file);
@@ -85,10 +86,13 @@ function readCsvFiles() {
               }
             }
             
-            // If no ID found, generate a UUID
-            if (!productId) {
-              productId = uuidv4().substring(0, 12).toUpperCase();
-              console.log(`Generated ID ${productId} for product because no abstract_product_id found`);
+            // Skip rows with blank Abstract IDs
+            if (!productId || productId.trim() === '') {
+              skippedRows++;
+              if (skippedRows % 100 === 0) {
+                console.log(`Skipped ${skippedRows} rows with blank Abstract ID`);
+              }
+              return; // Skip this row
             }
             
             // Track counts of each abstract ID
@@ -133,6 +137,7 @@ function readCsvFiles() {
               });
               
               console.log(`Total products loaded from CSVs: ${allProducts.length}`);
+              console.log(`Total rows skipped (blank Abstract ID): ${skippedRows}`);
               resolve(allProducts);
             }
           })
