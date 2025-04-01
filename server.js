@@ -310,7 +310,8 @@ async function loadData() {
             tenantId: `TENANT${i % 3 + 1}`,
             createdOn: new Date().toISOString().replace('T', ' ').substring(0, 19),
             assigned: false,
-            count: Math.floor(Math.random() * 5) + 1 // Random count 1-5 for sample data
+            count: Math.floor(Math.random() * 5) + 1, // Random count 1-5 for sample data
+            unassignedTime: null // Track when item was unassigned (for prioritization)
           });
         }
         await saveProducts();
@@ -354,7 +355,8 @@ function updateAgentAssignments() {
         priority: product.priority,
         tenantId: product.tenantId,
         createdOn: product.createdOn,
-        count: product.count || 1
+        count: product.count || 1,
+        assignmentId: assignment.id // Include assignment ID for easier unassignment
       });
     }
   });
@@ -453,7 +455,15 @@ app.post('/api/assign', async (req, res) => {
     const availableProducts = products
       .filter(p => !p.assigned && !assignedProductIds.has(p.id))
       .sort((a, b) => {
-        // First sort by priority
+        // First check if either was recently unassigned (prioritize these)
+        if (a.unassignedTime && !b.unassignedTime) return -1;
+        if (!a.unassignedTime && b.unassignedTime) return 1;
+        if (a.unassignedTime && b.unassignedTime) {
+          // Both were unassigned - sort by unassign time (oldest first)
+          return new Date(a.unassignedTime) - new Date(b.unassignedTime);
+        }
+        
+        // Then sort by priority
         const priorityDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
         if (priorityDiff !== 0) return priorityDiff;
         
@@ -467,6 +477,9 @@ app.post('/api/assign', async (req, res) => {
     }
     
     const productToAssign = availableProducts[0];
+    
+    // Clear unassignedTime if it was previously unassigned
+    productToAssign.unassignedTime = null;
     
     // Update product status
     productToAssign.assigned = true;
@@ -488,7 +501,8 @@ app.post('/api/assign', async (req, res) => {
       priority: productToAssign.priority,
       tenantId: productToAssign.tenantId,
       createdOn: productToAssign.createdOn,
-      count: productToAssign.count || 1
+      count: productToAssign.count || 1,
+      assignmentId: assignment.id // Include assignment ID for easier unassignment
     });
     
     // Also mark all other products with the same Abstract ID as assigned
@@ -498,6 +512,7 @@ app.post('/api/assign', async (req, res) => {
     
     sameAbstractIdProducts.forEach(p => {
       p.assigned = true;
+      p.unassignedTime = null; // Clear unassignedTime if it exists
     });
     
     console.log(`Assigned product ID ${productToAssign.id} to agent ${agent.name}`);
@@ -571,6 +586,166 @@ app.post('/api/complete', async (req, res) => {
     });
   } catch (error) {
     console.error('Error completing task:', error);
+    res.status(500).json({ error: `Server error: ${error.message}` });
+  }
+});
+
+// Unassign all tasks from all agents
+app.post('/api/unassign-all', async (req, res) => {
+  try {
+    // Get all current assignments
+    const currentAssignmentCount = assignments.length;
+    
+    // Mark the unassigned time for all products that are being unassigned
+    const currentTime = new Date().toISOString();
+    assignments.forEach(assignment => {
+      const product = products.find(p => p.id === assignment.productId);
+      if (product) {
+        product.assigned = false;
+        product.unassignedTime = currentTime;
+      }
+    });
+    
+    // Clear all assignments
+    assignments = [];
+    
+    // Reset all agents' currentAssignments
+    agents.forEach(agent => {
+      agent.currentAssignments = [];
+    });
+    
+    // Save changes
+    await saveProducts();
+    await saveAssignments();
+    await saveAgents();
+    
+    console.log(`Unassigned all ${currentAssignmentCount} tasks`);
+    
+    res.status(200).json({ 
+      message: `Successfully unassigned all ${currentAssignmentCount} tasks. They will be prioritized for future assignments.`
+    });
+  } catch (error) {
+    console.error('Error unassigning all tasks:', error);
+    res.status(500).json({ error: `Server error: ${error.message}` });
+  }
+});
+
+// Unassign all tasks from a specific agent
+app.post('/api/unassign-agent', async (req, res) => {
+  try {
+    const { agentId } = req.body;
+    
+    if (!agentId) {
+      return res.status(400).json({ error: 'Agent ID is required' });
+    }
+    
+    const agent = agents.find(a => a.id === agentId);
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+    
+    // Get the agent's current assignments
+    const agentAssignmentCount = agent.currentAssignments.length;
+    
+    if (agentAssignmentCount === 0) {
+      return res.status(200).json({ message: 'Agent has no tasks to unassign' });
+    }
+    
+    // Mark current time for unassignment
+    const currentTime = new Date().toISOString();
+    
+    // Get all product IDs assigned to this agent
+    const productIds = agent.currentAssignments.map(task => task.productId);
+    
+    // Mark these products as unassigned with timestamp
+    productIds.forEach(productId => {
+      const productsWithThisId = products.filter(p => p.id === productId);
+      productsWithThisId.forEach(product => {
+        product.assigned = false;
+        product.unassignedTime = currentTime;
+      });
+    });
+    
+    // Remove assignments for this agent
+    assignments = assignments.filter(a => a.agentId !== agentId);
+    
+    // Clear agent's assignments
+    agent.currentAssignments = [];
+    
+    // Save changes
+    await saveProducts();
+    await saveAssignments();
+    await saveAgents();
+    
+    console.log(`Unassigned ${agentAssignmentCount} tasks from agent ${agent.name}`);
+    
+    res.status(200).json({ 
+      message: `Successfully unassigned ${agentAssignmentCount} tasks from ${agent.name}. They will be prioritized for future assignments.`
+    });
+  } catch (error) {
+    console.error('Error unassigning agent tasks:', error);
+    res.status(500).json({ error: `Server error: ${error.message}` });
+  }
+});
+
+// Unassign a specific Abstract ID from any agent that has it
+app.post('/api/unassign-product', async (req, res) => {
+  try {
+    const { productId } = req.body;
+    
+    if (!productId) {
+      return res.status(400).json({ error: 'Product ID is required' });
+    }
+    
+    // Find all assignments for this product ID
+    const productAssignments = assignments.filter(a => a.productId === productId);
+    
+    if (productAssignments.length === 0) {
+      return res.status(404).json({ error: 'Product is not currently assigned to any agent' });
+    }
+    
+    // Get current time for unassignment
+    const currentTime = new Date().toISOString();
+    
+    // Get all agents that have this product assigned
+    const affectedAgentIds = productAssignments.map(a => a.agentId);
+    
+    // Update agents to remove this product
+    affectedAgentIds.forEach(agentId => {
+      const agent = agents.find(a => a.id === agentId);
+      if (agent) {
+        agent.currentAssignments = agent.currentAssignments.filter(
+          task => task.productId !== productId
+        );
+      }
+    });
+    
+    // Mark the product as unassigned
+    const productsWithThisId = products.filter(p => p.id === productId);
+    productsWithThisId.forEach(product => {
+      product.assigned = false;
+      product.unassignedTime = currentTime;
+    });
+    
+    // Remove the assignments for this product
+    assignments = assignments.filter(a => a.productId !== productId);
+    
+    // Save changes
+    await saveProducts();
+    await saveAssignments();
+    await saveAgents();
+    
+    const affectedAgents = affectedAgentIds.length === 1 ? 
+      `agent ${agents.find(a => a.id === affectedAgentIds[0]).name}` : 
+      `${affectedAgentIds.length} agents`;
+    
+    console.log(`Unassigned product ID ${productId} from ${affectedAgents}`);
+    
+    res.status(200).json({ 
+      message: `Successfully unassigned product ID ${productId} from ${affectedAgents}. It will be prioritized for future assignments.`
+    });
+  } catch (error) {
+    console.error('Error unassigning product:', error);
     res.status(500).json({ error: `Server error: ${error.message}` });
   }
 });
