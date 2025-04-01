@@ -1,13 +1,15 @@
 /***************************************************************
- * server.js - Final Script
+ * server.js - Final Script (Updated)
  * 
  * Features:
  * - Loads agents from "Walmart BH Roster.xlsx" (column E).
  * - Loads products from "output.csv" (columns: 
  *   item.abstract_product_id, abstract_product_id, rule_priority, tenant_id, oldest_created_on, count).
  * - Provides endpoints to refresh data, upload output.csv, assign tasks,
- *   complete tasks, unassign tasks, and download CSVs for completed/unassigned items.
+ *   complete tasks (including complete all tasks per agent),
+ *   unassign tasks, and download CSVs for completed/unassigned items.
  ***************************************************************/
+
 const express = require('express');
 const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
@@ -15,7 +17,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const csvParser = require('csv-parser');
 const xlsx = require('xlsx');
-const { createReadStream } = require('fs');
+const { createReadStream, createWriteStream } = require('fs');
 const multer = require('multer');
 const { format } = require('@fast-csv/format'); // for CSV download endpoints
 
@@ -38,16 +40,17 @@ let assignments = [];
 const DATA_DIR = path.join(__dirname, 'data');
 const AGENTS_FILE = path.join(DATA_DIR, 'agents.json');
 const ASSIGNMENTS_FILE = path.join(DATA_DIR, 'assignments.json');
-// Expect output.csv inside the data folder
+// Master output CSV (merged file)
 const OUTPUT_CSV = path.join(DATA_DIR, 'output.csv');
 const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
 
 // ------------------------------
 // Multer Configuration
 // ------------------------------
+// Save uploaded file with a unique filename so we can merge it later
 const storage = multer.diskStorage({
   destination: (req, file, cb) => { cb(null, DATA_DIR); },
-  filename: (req, file, cb) => { cb(null, 'output.csv'); } // Always save as output.csv
+  filename: (req, file, cb) => { cb(null, Date.now() + '-' + file.originalname); }
 });
 const upload = multer({ storage });
 
@@ -286,14 +289,65 @@ app.get('/api/unassigned-products', (req, res) => {
   res.json(unassigned);
 });
 
-// Endpoint to upload a new output CSV (overwrites existing output.csv)
+// ------------------------------
+// File Upload Endpoint (Merge CSV)
+// ------------------------------
 app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => {
   try {
     console.log('File upload received:', req.file);
-    // No need to rename as multer already saves with the name 'output.csv'
-    console.log(`Output CSV updated: ${OUTPUT_CSV}`);
+    // Read the new CSV data from the uploaded file
+    const newData = await new Promise((resolve, reject) => {
+      const results = [];
+      createReadStream(req.file.path)
+        .pipe(csvParser())
+        .on('data', (row) => results.push(row))
+        .on('end', () => resolve(results))
+        .on('error', reject);
+    });
+
+    // Read existing CSV data if the master output CSV exists
+    let existingData = [];
+    if (await fileExists(OUTPUT_CSV)) {
+      existingData = await new Promise((resolve, reject) => {
+        const results = [];
+        createReadStream(OUTPUT_CSV)
+          .pipe(csvParser())
+          .on('data', (row) => results.push(row))
+          .on('end', () => resolve(results))
+          .on('error', reject);
+      });
+    }
+
+    // Merge newData with existingData based on a unique product identifier.
+    // Adjust the key field as needed (e.g., abstract_product_id)
+    const mergedDataMap = new Map();
+    // Add existing data
+    existingData.forEach(row => {
+      const key = row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'];
+      if (key) mergedDataMap.set(key, row);
+    });
+    // Merge in new data (update or add new rows)
+    newData.forEach(row => {
+      const key = row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'];
+      if (key) {
+        mergedDataMap.set(key, row);
+      }
+    });
+    const mergedData = Array.from(mergedDataMap.values());
+
+    // Write merged data back to the master CSV file (OUTPUT_CSV)
+    const ws = createWriteStream(OUTPUT_CSV);
+    const csvStream = format({ headers: true });
+    csvStream.pipe(ws);
+    mergedData.forEach(row => csvStream.write(row));
+    csvStream.end();
+
+    // Optionally remove the temporary uploaded file
+    await fs.unlink(req.file.path);
+    
+    // Reload data (this will now include the merged products)
     await loadData();
-    res.status(200).json({ message: 'Output CSV uploaded and data refreshed successfully' });
+    res.status(200).json({ message: 'Output CSV uploaded and merged successfully. Data refreshed.' });
   } catch (error) {
     console.error('Error uploading output CSV:', error);
     res.status(500).json({ error: error.message });
@@ -399,6 +453,42 @@ app.post('/api/complete', async (req, res) => {
     res.status(200).json({ message: `Task ${productId} completed by ${agent.name}` });
   } catch (error) {
     console.error('Error completing task:', error);
+    res.status(500).json({ error: `Server error: ${error.message}` });
+  }
+});
+
+// ------------------------------
+// New Endpoint: Complete All Tasks for Agent
+// ------------------------------
+app.post('/api/complete-all-agent', async (req, res) => {
+  try {
+    const { agentId } = req.body;
+    if (!agentId) {
+      return res.status(400).json({ error: 'Agent ID is required' });
+    }
+    const agent = agents.find(a => a.id === agentId);
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+    const activeAssignments = assignments.filter(a => a.agentId === agentId && !a.completed);
+    if (activeAssignments.length === 0) {
+      return res.status(200).json({ message: 'No active tasks to complete for this agent' });
+    }
+    activeAssignments.forEach(assignment => {
+      assignment.completed = true;
+      assignment.completedOn = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      const product = products.find(p => p.id === assignment.productId);
+      if (product) {
+        product.assigned = false;
+      }
+    });
+    agent.currentAssignments = [];
+    await saveAssignments();
+    updateAgentAssignments();
+    await saveAgents();
+    res.status(200).json({ message: `Completed all (${activeAssignments.length}) tasks for agent ${agent.name}` });
+  } catch (error) {
+    console.error('Error completing all tasks for agent:', error);
     res.status(500).json({ error: `Server error: ${error.message}` });
   }
 });
@@ -518,6 +608,48 @@ app.get('/api/download/unassigned-products', (req, res) => {
       tenantId: p.tenantId,
       createdOn: p.createdOn,
       count: p.count
+    });
+  });
+  csvStream.end();
+});
+
+// Download previously assigned products as CSV.
+app.get('/api/download/previously-assigned', (req, res) => {
+  // Previously assigned products are those that were assigned and then unassigned.
+  // For this example, we'll consider assignments that are completed.
+  const previouslyAssigned = assignments.filter(a => a.completed);
+  res.setHeader('Content-disposition', 'attachment; filename=previously-assigned.csv');
+  res.setHeader('Content-Type', 'text/csv');
+  const csvStream = format({ headers: true });
+  csvStream.pipe(res);
+  previouslyAssigned.forEach(a => {
+    const agent = agents.find(ag => ag.id === a.agentId);
+    csvStream.write({
+      assignmentId: a.id,
+      agentName: agent ? agent.name : 'Unknown',
+      productId: a.productId,
+      assignedOn: a.assignedOn,
+      completedOn: a.completedOn
+    });
+  });
+  csvStream.end();
+});
+
+// Download complete product queue as CSV.
+app.get('/api/download/queue', (req, res) => {
+  // For the product queue, we'll consider all products.
+  res.setHeader('Content-disposition', 'attachment; filename=product-queue.csv');
+  res.setHeader('Content-Type', 'text/csv');
+  const csvStream = format({ headers: true });
+  csvStream.pipe(res);
+  products.forEach(p => {
+    csvStream.write({
+      productId: p.id,
+      priority: p.priority,
+      tenantId: p.tenantId,
+      createdOn: p.createdOn,
+      count: p.count,
+      assigned: p.assigned ? "Yes" : "No"
     });
   });
   csvStream.end();
