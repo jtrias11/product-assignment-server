@@ -1,12 +1,12 @@
 /***************************************************************
- * server.js - Final Script with Output CSV Upload Endpoint
+ * server.js - Final Script
  * 
  * Features:
- * - Loads agents from Walmart BH Roster.xlsx (column E).
- * - Loads products from output.csv (columns:
+ * - Loads agents from "Walmart BH Roster.xlsx" (column E).
+ * - Loads products from "output.csv" (columns: 
  *   item.abstract_product_id, abstract_product_id, rule_priority, tenant_id, oldest_created_on, count).
- * - Provides endpoints to refresh data, assign tasks, complete tasks, and unassign tasks.
- * - Includes an endpoint (/api/upload-output) to upload a new output CSV file (without redeploying).
+ * - Provides endpoints to refresh data, upload output.csv, assign tasks,
+ *   complete tasks, unassign tasks, and download CSVs for completed/unassigned items.
  ***************************************************************/
 const express = require('express');
 const cors = require('cors');
@@ -15,14 +15,13 @@ const fs = require('fs').promises;
 const path = require('path');
 const csvParser = require('csv-parser');
 const xlsx = require('xlsx');
-const { createReadStream, createWriteStream } = require('fs');
+const { createReadStream } = require('fs');
 const multer = require('multer');
-const { format } = require('@fast-csv/format'); // For CSV download endpoints
+const { format } = require('@fast-csv/format'); // for CSV download endpoints
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Enable CORS and JSON parsing
 app.use(cors());
 app.use(express.json());
 
@@ -39,7 +38,7 @@ let assignments = [];
 const DATA_DIR = path.join(__dirname, 'data');
 const AGENTS_FILE = path.join(DATA_DIR, 'agents.json');
 const ASSIGNMENTS_FILE = path.join(DATA_DIR, 'assignments.json');
-// Use the correct output CSV file name ("output.csv") inside DATA_DIR.
+// Expect output.csv inside the data folder
 const OUTPUT_CSV = path.join(DATA_DIR, 'output.csv');
 const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
 
@@ -73,7 +72,7 @@ async function fileExists(filePath) {
   }
 }
 
-// Reads products from the output CSV file.
+// Reads products from output.csv
 function readOutputCsv() {
   return new Promise((resolve) => {
     let results = [];
@@ -82,11 +81,12 @@ function readOutputCsv() {
       .then(() => {
         createReadStream(OUTPUT_CSV)
           .pipe(csvParser())
-          .on('data', (row) => {
-            results.push(row);
-          })
+          .on('data', (row) => results.push(row))
           .on('end', () => {
             console.log(`Loaded ${results.length} rows from output CSV.`);
+            if(results.length > 0) {
+              console.log("First row:", results[0]);
+            }
             resolve(results);
           })
           .on('error', (error) => {
@@ -101,7 +101,7 @@ function readOutputCsv() {
   });
 }
 
-// Reads agents from the Excel roster (column E)
+// Reads agents from the Excel roster (using column E)
 async function readRosterExcel() {
   try {
     if (!(await fileExists(ROSTER_EXCEL))) {
@@ -137,7 +137,7 @@ async function readRosterExcel() {
       }
     }
     const agentsList = [];
-    // Read column E (index 4) ignoring blanks.
+    // Read column E (index 4), ignoring blanks.
     for (let row = 1; row <= range.e.r; row++) {
       const cellRef = xlsx.utils.encode_cell({ r: row, c: 4 });
       const cell = worksheet[cellRef];
@@ -163,13 +163,12 @@ async function readRosterExcel() {
 }
 
 // ------------------------------
-// Load Data (Agents, Products, Assignments)
+// Load Data
 // ------------------------------
 async function loadData() {
   try {
     await ensureDataDir();
-
-    // 1. Load agents from JSON or fallback to Excel.
+    // 1. Load agents from JSON (if available) or Excel.
     try {
       const agentsData = await fs.readFile(AGENTS_FILE, 'utf8');
       agents = JSON.parse(agentsData);
@@ -189,13 +188,12 @@ async function loadData() {
         await saveAgents();
       }
     }
-
-    // 2. Load products from the output CSV.
+    // 2. Load products from output.csv.
     try {
       const csvRows = await readOutputCsv();
       products = csvRows.map(row => ({
         id: row.abstract_product_id,
-        name: "", // Update if needed.
+        name: "", // update if you have a product name column
         priority: row.rule_priority,
         tenantId: row.tenant_id,
         createdOn: row.oldest_created_on,
@@ -207,7 +205,6 @@ async function loadData() {
       console.log('Error loading products from output CSV:', error);
       products = [];
     }
-
     // 3. Load assignments from file.
     try {
       const assignmentsData = await fs.readFile(ASSIGNMENTS_FILE, 'utf8');
@@ -275,10 +272,9 @@ app.get('/api/agents', (req, res) => { res.json(agents); });
 app.get('/api/products', (req, res) => { res.json(products); });
 app.get('/api/assignments', (req, res) => { res.json(assignments); });
 
-// Endpoint to upload a new output CSV file (overwrites existing output.csv)
+// Endpoint to upload a new output CSV (overwrites existing output.csv)
 app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => {
   try {
-    // Rename or copy the uploaded file to OUTPUT_CSV (overwriting it)
     const uploadedFilePath = req.file.path;
     await fs.rename(uploadedFilePath, OUTPUT_CSV);
     console.log(`Output CSV updated: ${OUTPUT_CSV}`);
@@ -370,7 +366,9 @@ app.post('/api/complete', async (req, res) => {
     if (!agent) {
       return res.status(404).json({ error: 'Agent not found' });
     }
-    const assignmentIndex = assignments.findIndex(a => a.agentId === agentId && a.productId === productId && !a.completed);
+    const assignmentIndex = assignments.findIndex(a =>
+      a.agentId === agentId && a.productId === productId && !a.completed
+    );
     if (assignmentIndex === -1) {
       return res.status(404).json({ error: 'Active assignment not found' });
     }
