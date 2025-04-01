@@ -19,6 +19,9 @@ let agents = [];
 let products = [];
 let assignments = [];
 
+// Lock for handling concurrent assignment requests
+let assignmentInProgress = false;
+
 // Data directories and files
 const DATA_DIR = path.join(__dirname, 'data');
 const AGENTS_FILE = path.join(DATA_DIR, 'agents.json');
@@ -403,26 +406,47 @@ app.get('/api/assignments', (req, res) => {
 
 // Assign a task to an agent
 app.post('/api/assign', async (req, res) => {
+  // Check if another assignment is in progress to prevent race conditions
+  if (assignmentInProgress) {
+    return res.status(409).json({ error: 'Another assignment is in progress, please try again in a moment' });
+  }
+  
+  // Set the lock
+  assignmentInProgress = true;
+  
   try {
     const { agentId } = req.body;
     
     if (!agentId) {
+      assignmentInProgress = false;
       return res.status(400).json({ error: 'Agent ID is required' });
     }
     
     const agent = agents.find(a => a.id === agentId);
     if (!agent) {
+      assignmentInProgress = false;
       return res.status(404).json({ error: 'Agent not found' });
     }
     
     if (agent.currentAssignments.length >= agent.capacity) {
+      assignmentInProgress = false;
       return res.status(400).json({ error: 'Agent has reached maximum capacity' });
     }
     
-    // Find an unassigned product with highest priority
+    // Get list of all Abstract Product IDs that are already assigned to any agent
+    const assignedProductIds = new Set();
+    agents.forEach(a => {
+      a.currentAssignments.forEach(task => {
+        assignedProductIds.add(task.productId);
+      });
+    });
+    
+    console.log(`Currently assigned product IDs: ${Array.from(assignedProductIds).join(', ')}`);
+    
+    // Find unassigned products with highest priority
     const priorityOrder = { "P1": 0, "P2": 1, "P3": 2 };
     const availableProducts = products
-      .filter(p => !p.assigned)
+      .filter(p => !p.assigned && !assignedProductIds.has(p.id))
       .sort((a, b) => {
         // First sort by priority
         const priorityDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
@@ -433,6 +457,7 @@ app.post('/api/assign', async (req, res) => {
       });
     
     if (availableProducts.length === 0) {
+      assignmentInProgress = false;
       return res.status(404).json({ error: 'No available products to assign' });
     }
     
@@ -461,16 +486,32 @@ app.post('/api/assign', async (req, res) => {
       count: productToAssign.count || 1
     });
     
+    // Also mark all other products with the same Abstract ID as assigned
+    const sameAbstractIdProducts = products.filter(p => 
+      p.id === productToAssign.id && p !== productToAssign
+    );
+    
+    sameAbstractIdProducts.forEach(p => {
+      p.assigned = true;
+    });
+    
+    console.log(`Assigned product ID ${productToAssign.id} to agent ${agent.name}`);
+    
     // Save changes
     await saveProducts();
     await saveAssignments();
     await saveAgents();
+    
+    // Release the lock
+    assignmentInProgress = false;
     
     res.status(200).json({ 
       message: `Task ${productToAssign.id} assigned to ${agent.name}`,
       assignment
     });
   } catch (error) {
+    // Release the lock in case of error
+    assignmentInProgress = false;
     console.error('Error assigning task:', error);
     res.status(500).json({ error: `Server error: ${error.message}` });
   }
@@ -507,11 +548,13 @@ app.post('/api/complete', async (req, res) => {
     );
     
     // Update product (mark as completed, we'll keep it in the system but no longer assigned)
-    const product = products.find(p => p.id === productId);
-    if (product) {
+    const productsWithThisId = products.filter(p => p.id === productId);
+    productsWithThisId.forEach(product => {
       product.assigned = false;
       product.completed = true;
-    }
+    });
+    
+    console.log(`Completed product ID ${productId} by agent ${agent.name}`);
     
     // Save changes
     await saveProducts();
