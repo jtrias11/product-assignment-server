@@ -1,5 +1,5 @@
 /***************************************************************
- * server.js - Final Script with Corrected OUTPUT_CSV Path
+ * server.js - Final Script (with output CSV filename fixed)
  ***************************************************************/
 const express = require('express');
 const cors = require('cors');
@@ -32,8 +32,8 @@ const DATA_DIR = path.join(__dirname, 'data');
 const AGENTS_FILE = path.join(DATA_DIR, 'agents.json');
 const ASSIGNMENTS_FILE = path.join(DATA_DIR, 'assignments.json');
 
-// Update the OUTPUT_CSV path to look inside the data folder:
-const OUTPUT_CSV = path.join(DATA_DIR, 'data output.csv');
+// Use the correct output CSV file name ("output.csv") inside DATA_DIR
+const OUTPUT_CSV = path.join(DATA_DIR, 'output.csv');
 
 const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
 
@@ -185,7 +185,7 @@ async function loadData() {
       const csvRows = await readOutputCsv();
       products = csvRows.map(row => ({
         id: row.abstract_product_id,
-        name: "", // Set a default; update if you have a name column
+        name: "", // You can update this if you have a name column
         priority: row.rule_priority,
         tenantId: row.tenant_id,
         createdOn: row.oldest_created_on,
@@ -275,7 +275,7 @@ app.get('/api/assignments', (req, res) => {
   res.json(assignments);
 });
 
-// Refresh endpoint: re-read data from the output CSV and roster Excel
+// Refresh endpoint: re-read data from output CSV and roster Excel
 app.post('/api/refresh', async (req, res) => {
   try {
     await loadData();
@@ -317,7 +317,7 @@ app.post('/api/assign', async (req, res) => {
     });
     const availableProducts = products
       .filter(p => !p.assigned && !assignedProductIds.has(p.id))
-      .sort((a, b) => new Date(a.createdOn) - new Date(b.createdOn)); // oldest first
+      .sort((a, b) => new Date(a.createdOn) - new Date(b.createdOn));
     if (availableProducts.length === 0) {
       assignmentInProgress = false;
       return res.status(404).json({ error: 'No available products to assign' });
