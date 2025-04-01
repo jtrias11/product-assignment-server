@@ -47,7 +47,7 @@ const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
 // ------------------------------
 const storage = multer.diskStorage({
   destination: (req, file, cb) => { cb(null, DATA_DIR); },
-  filename: (req, file, cb) => { cb(null, file.originalname); }
+  filename: (req, file, cb) => { cb(null, 'output.csv'); } // Always save as output.csv
 });
 const upload = multer({ storage });
 
@@ -192,14 +192,16 @@ async function loadData() {
     try {
       const csvRows = await readOutputCsv();
       products = csvRows.map(row => ({
-        id: row.abstract_product_id,
+        id: row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'],
         name: "", // update if you have a product name column
-        priority: row.rule_priority,
+        priority: row.rule_priority || row.priority,
         tenantId: row.tenant_id,
-        createdOn: row.oldest_created_on,
+        createdOn: row.oldest_created_on || row.sys_created_on || row.created_on,
         count: row.count,
         assigned: false
       }));
+      // Filter out any products with null or undefined ID
+      products = products.filter(p => p.id);
       console.log(`Loaded ${products.length} products from output CSV`);
     } catch (error) {
       console.log('Error loading products from output CSV:', error);
@@ -272,11 +274,23 @@ app.get('/api/agents', (req, res) => { res.json(agents); });
 app.get('/api/products', (req, res) => { res.json(products); });
 app.get('/api/assignments', (req, res) => { res.json(assignments); });
 
+// Endpoint to get completed assignments
+app.get('/api/completed-assignments', (req, res) => {
+  const completed = assignments.filter(a => a.completed);
+  res.json(completed);
+});
+
+// Endpoint to get unassigned products
+app.get('/api/unassigned-products', (req, res) => {
+  const unassigned = products.filter(p => !p.assigned);
+  res.json(unassigned);
+});
+
 // Endpoint to upload a new output CSV (overwrites existing output.csv)
 app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => {
   try {
-    const uploadedFilePath = req.file.path;
-    await fs.rename(uploadedFilePath, OUTPUT_CSV);
+    console.log('File upload received:', req.file);
+    // No need to rename as multer already saves with the name 'output.csv'
     console.log(`Output CSV updated: ${OUTPUT_CSV}`);
     await loadData();
     res.status(200).json({ message: 'Output CSV uploaded and data refreshed successfully' });
