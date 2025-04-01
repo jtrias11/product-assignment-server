@@ -95,7 +95,7 @@ function readCsvFiles() {
   });
 }
 
-// Function to read Excel roster file
+// Function to read Excel roster file specifically looking for the "Agents List" sheet and column E
 async function readRosterExcel() {
   try {
     if (!await fileExists(ROSTER_EXCEL)) {
@@ -104,24 +104,54 @@ async function readRosterExcel() {
     }
     
     const workbook = xlsx.readFile(ROSTER_EXCEL);
-    const sheetName = workbook.SheetNames[0];
+    
+    // Look for a sheet named "Agents List", or use the first sheet if not found
+    let sheetName = "Agents List";
+    if (!workbook.SheetNames.includes(sheetName)) {
+      console.log('Sheet "Agents List" not found, checking other sheet names...');
+      // Try alternative names
+      const possibleSheetNames = ["Agents", "AgentsList", "Agents_List", "Agent List", "Agent_List"];
+      for (const name of possibleSheetNames) {
+        if (workbook.SheetNames.includes(name)) {
+          sheetName = name;
+          console.log(`Found sheet "${name}" instead`);
+          break;
+        }
+      }
+      
+      // If still not found, use first sheet
+      if (!workbook.SheetNames.includes(sheetName)) {
+        sheetName = workbook.SheetNames[0];
+        console.log(`Using first available sheet: "${sheetName}"`);
+      }
+    }
+    
     const worksheet = workbook.Sheets[sheetName];
-    const data = xlsx.utils.sheet_to_json(worksheet);
     
-    // Map Excel data to agent structure
-    // Adjust the field mapping based on your Excel structure
-    const agents = data.map((row, index) => {
-      return {
-        id: index + 1,
-        name: row.Name || row.name || row.AGENT || row.agent || 'Unknown Agent',
-        role: row.Role || row.role || row.ROLE || 'Item Review',
-        capacity: parseInt(row.Capacity || row.capacity || 10),
-        currentAssignments: []
-      };
-    });
+    // Get the range of the worksheet
+    const range = xlsx.utils.decode_range(worksheet['!ref']);
+    const agentsList = [];
     
-    console.log(`Read ${agents.length} agents from Excel roster`);
-    return agents;
+    // Loop through rows and extract names from column E (which is index 4)
+    // Start from row 1 (index 0) or adjust as needed depending on headers
+    for (let row = 0; row <= range.e.r; row++) {
+      const cellRef = xlsx.utils.encode_cell({ r: row, c: 4 }); // Column E (index 4)
+      const cell = worksheet[cellRef];
+      
+      // Check if cell exists and has a value
+      if (cell && cell.v && typeof cell.v === 'string' && cell.v.trim() !== '') {
+        agentsList.push({
+          id: agentsList.length + 1,
+          name: cell.v.trim(),
+          role: "Item Review",
+          capacity: 10,
+          currentAssignments: []
+        });
+      }
+    }
+    
+    console.log(`Read ${agentsList.length} agents from Excel roster (column E)`);
+    return agentsList;
   } catch (error) {
     console.error('Error reading Excel roster:', error);
     return [];
