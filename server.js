@@ -11,19 +11,25 @@ const app = express();
 app.use(cors({
   origin: [
     'http://localhost:3000',  // Local React frontend
-    'https://your-frontend-domain.com',  // Production frontend URL
+    'https://product-assignment-frontend.onrender.com',  // Production frontend
     '*'  // Be cautious with this in production
   ],
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
 }));
 app.use(express.json());
 
-// Flexible directory configuration
-const PRODUCT_DIRECTORY = process.env.PRODUCT_DIRECTORY || path.join(__dirname, 'data');
-const ROSTER_FILE_PATH = process.env.ROSTER_FILE_PATH || path.join(__dirname, 'data', 'Walmart_BH_Roster.xlsx');
+// Flexible directory configuration with absolute path
+const PRODUCT_DIRECTORY = path.join(__dirname, 'data');
+const ROSTER_FILE_PATH = path.join(__dirname, 'data', 'Walmart BH Roster.xlsx');
 
 // Ensure data directory exists
 fs.mkdirpSync(PRODUCT_DIRECTORY);
+
+// Comprehensive logging utility
+function log(message, data = null) {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${message}`, data ? data : '');
+}
 
 // In-memory storage (would use a database in production)
 let products = [];
@@ -33,12 +39,23 @@ let assignments = [];
 // Function to load products from CSV
 async function loadProductsFromCSV() {
   try {
+    log('Starting CSV product loading process');
+    log('Product Directory:', PRODUCT_DIRECTORY);
+
+    // Validate directory
+    if (!await fs.exists(PRODUCT_DIRECTORY)) {
+      log('ERROR: Product directory does not exist');
+      return [];
+    }
+
     // Get list of CSV files
     const files = await fs.readdir(PRODUCT_DIRECTORY);
     const csvFiles = files.filter(file => file.toLowerCase().endsWith('.csv'));
     
+    log('CSV Files found:', csvFiles);
+
     if (csvFiles.length === 0) {
-      console.log('No CSV files found');
+      log('No CSV files found in directory');
       return [];
     }
     
@@ -47,7 +64,7 @@ async function loadProductsFromCSV() {
     
     for (const file of csvFiles) {
       const filePath = path.join(PRODUCT_DIRECTORY, file);
-      console.log(`Processing file: ${file}`);
+      log(`Processing file: ${file}`);
       
       // Process each CSV file
       const results = await new Promise((resolve, reject) => {
@@ -57,11 +74,11 @@ async function loadProductsFromCSV() {
           .pipe(csvParser())
           .on('data', (data) => fileResults.push(data))
           .on('end', () => {
-            console.log(`Finished processing ${file}`);
+            log(`Finished processing ${file}`);
             resolve(fileResults);
           })
           .on('error', (error) => {
-            console.error(`Error reading ${file}:`, error);
+            log(`Error reading ${file}:`, error);
             reject(error);
           });
       });
@@ -89,9 +106,10 @@ async function loadProductsFromCSV() {
       return dateA - dateB;
     });
     
+    log(`Processed ${allProducts.length} total products`);
     return allProducts;
   } catch (error) {
-    console.error('Error loading products:', error);
+    log('CRITICAL ERROR in loadProductsFromCSV:', error);
     return [];
   }
 }
@@ -99,19 +117,20 @@ async function loadProductsFromCSV() {
 // Function to load agents from Excel
 async function loadAgentsFromExcel() {
   try {
+    log('Starting Excel agent loading process');
+    log('Roster File Path:', ROSTER_FILE_PATH);
+
     if (!await fs.exists(ROSTER_FILE_PATH)) {
-      console.log('Roster file not found');
+      log('ERROR: Roster file not found');
       return [];
     }
-    
-    console.log(`Processing roster file: ${ROSTER_FILE_PATH}`);
     
     // Read the Excel file
     const workbook = XLSX.readFile(ROSTER_FILE_PATH);
     
     // Check if "Agents List" sheet exists
     if (!workbook.SheetNames.includes('Agents List')) {
-      console.log('Agents List sheet not found');
+      log('ERROR: Agents List sheet not found');
       return [];
     }
     
@@ -122,7 +141,7 @@ async function loadAgentsFromExcel() {
     const data = XLSX.utils.sheet_to_json(worksheet);
     
     // Process agents
-    return data
+    const processedAgents = data
       .filter(row => row['Status'] === 'Active')
       .map((row, index) => ({
         id: index + 1,
@@ -131,30 +150,41 @@ async function loadAgentsFromExcel() {
         capacity: 10,
         currentAssignments: []
       }));
+    
+    log(`Processed ${processedAgents.length} agents`);
+    return processedAgents;
   } catch (error) {
-    console.error('Error loading agents:', error);
+    log('CRITICAL ERROR in loadAgentsFromExcel:', error);
     return [];
   }
 }
 
-// API endpoints
+// API endpoints with comprehensive error handling
 app.get('/api/products', async (req, res) => {
   try {
-    // Dynamically load products each time
+    log('Products API endpoint called');
     products = await loadProductsFromCSV();
     res.json(products);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to load products' });
+    log('Error in products endpoint:', error);
+    res.status(500).json({ 
+      error: 'Failed to load products', 
+      details: error.toString() 
+    });
   }
 });
 
 app.get('/api/agents', async (req, res) => {
   try {
-    // Dynamically load agents each time
+    log('Agents API endpoint called');
     agents = await loadAgentsFromExcel();
     res.json(agents);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to load agents' });
+    log('Error in agents endpoint:', error);
+    res.status(500).json({ 
+      error: 'Failed to load agents', 
+      details: error.toString() 
+    });
   }
 });
 
@@ -165,6 +195,7 @@ app.get('/api/assignments', (req, res) => {
 // Manual refresh endpoint
 app.post('/api/refresh-data', async (req, res) => {
   try {
+    log('Manual data refresh initiated');
     products = await loadProductsFromCSV();
     agents = await loadAgentsFromExcel();
     
@@ -175,7 +206,7 @@ app.post('/api/refresh-data', async (req, res) => {
       agentCount: agents.length
     });
   } catch (error) {
-    console.error('Error refreshing data:', error);
+    log('Error during manual refresh:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Failed to refresh data',
@@ -184,20 +215,20 @@ app.post('/api/refresh-data', async (req, res) => {
   }
 });
 
-// Add assignment and completion endpoints here (from previous implementation)
-
 // Root endpoint for health check
 app.get('/', (req, res) => {
   res.json({
     status: 'Server is running',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    productDirectory: PRODUCT_DIRECTORY,
+    rosterFilePath: ROSTER_FILE_PATH
   });
 });
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  log('Unhandled Error:', err);
   res.status(500).json({ 
     error: 'Something went wrong!',
     message: err.message 
@@ -210,9 +241,9 @@ const HOST = process.env.HOST || '0.0.0.0';
 
 // Start the server
 const server = app.listen(PORT, HOST, () => {
-  console.log(`Server running on:`);
-  console.log(`- http://localhost:${PORT}`);
-  console.log(`- http://${HOST}:${PORT}`);
+  log(`Server running on:`);
+  log(`- http://localhost:${PORT}`);
+  log(`- http://${HOST}:${PORT}`);
 });
 
 module.exports = { app, server }; // Export for potential testing
