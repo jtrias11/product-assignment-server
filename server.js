@@ -7,7 +7,8 @@
  *   item.abstract_product_id, abstract_product_id, rule_priority, tenant_id, oldest_created_on, count).
  * - Provides endpoints to refresh data, upload output.csv, assign tasks,
  *   complete tasks (including complete all tasks per agent),
- *   unassign tasks, and download CSVs for completed/unassigned items.
+ *   unassign tasks (which now marks assignments as unassigned rather than removing them),
+ *   and download CSVs for completed/unassigned items.
  ***************************************************************/
 
 const express = require('express');
@@ -226,24 +227,27 @@ async function loadData() {
   }
 }
 
+// Update agent assignments so that only active tasks (not completed or unassigned) appear.
 function updateAgentAssignments() {
   agents.forEach(agent => { agent.currentAssignments = []; });
   assignments.forEach(assignment => {
-    const agent = agents.find(a => a.id === assignment.agentId);
-    const product = products.find(p => p.id === assignment.productId);
-    if (agent && product) {
-      agent.currentAssignments.push({
-        productId: product.id,
-        name: product.name,
-        priority: product.priority,
-        tenantId: product.tenantId,
-        createdOn: product.createdOn,
-        count: product.count || 1,
-        assignmentId: assignment.id,
-        assignedOn: assignment.assignedOn || null,
-        completed: assignment.completed || false,
-        completedOn: assignment.completedOn || null
-      });
+    if (!assignment.completed && !assignment.unassignedTime) {
+      const agent = agents.find(a => a.id === assignment.agentId);
+      const product = products.find(p => p.id === assignment.productId);
+      if (agent && product) {
+        agent.currentAssignments.push({
+          productId: product.id,
+          name: product.name,
+          priority: product.priority,
+          tenantId: product.tenantId,
+          createdOn: product.createdOn,
+          count: product.count || 1,
+          assignmentId: assignment.id,
+          assignedOn: assignment.assignedOn || null,
+          completed: assignment.completed || false,
+          completedOn: assignment.completedOn || null
+        });
+      }
     }
   });
 }
@@ -319,7 +323,6 @@ app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => 
     }
 
     // Merge newData with existingData based on a unique product identifier.
-    // Adjust the key field as needed (e.g., abstract_product_id)
     const mergedDataMap = new Map();
     // Add existing data
     existingData.forEach(row => {
@@ -446,7 +449,7 @@ app.post('/api/complete', async (req, res) => {
     if (product) {
       product.assigned = false;
     }
-    agent.currentAssignments = agent.currentAssignments.filter(task => task.productId !== productId);
+    // Remove from agent.currentAssignments (updateAgentAssignments will handle active tasks)
     await saveAssignments();
     updateAgentAssignments();
     await saveAgents();
@@ -470,7 +473,7 @@ app.post('/api/complete-all-agent', async (req, res) => {
     if (!agent) {
       return res.status(404).json({ error: 'Agent not found' });
     }
-    const activeAssignments = assignments.filter(a => a.agentId === agentId && !a.completed);
+    const activeAssignments = assignments.filter(a => a.agentId === agentId && !a.completed && !a.unassignedTime);
     if (activeAssignments.length === 0) {
       return res.status(200).json({ message: 'No active tasks to complete for this agent' });
     }
@@ -482,7 +485,6 @@ app.post('/api/complete-all-agent', async (req, res) => {
         product.assigned = false;
       }
     });
-    agent.currentAssignments = [];
     await saveAssignments();
     updateAgentAssignments();
     await saveAgents();
@@ -496,11 +498,11 @@ app.post('/api/complete-all-agent', async (req, res) => {
 // Unassign a single product.
 app.post('/api/unassign-product', async (req, res) => {
   try {
-    const { productId } = req.body;
+    const { productId, agentId } = req.body;
     if (!productId) {
       return res.status(400).json({ error: 'Product ID is required' });
     }
-    const productAssignments = assignments.filter(a => a.productId === productId && !a.completed);
+    const productAssignments = assignments.filter(a => a.productId === productId && !a.completed && !a.unassignedTime);
     if (productAssignments.length === 0) {
       return res.status(404).json({ error: 'No active assignment found for this product' });
     }
@@ -509,8 +511,11 @@ app.post('/api/unassign-product', async (req, res) => {
       if (agent) {
         agent.currentAssignments = agent.currentAssignments.filter(task => task.productId !== productId);
       }
+      // Instead of removing, mark the assignment as unassigned.
+      assignment.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      assignment.unassignedBy = agent ? agent.name : 'Unknown';
+      assignment.wasUnassigned = true;
     });
-    assignments = assignments.filter(a => a.productId !== productId || a.completed);
     const product = products.find(p => p.id === productId);
     if (product) {
       product.assigned = false;
@@ -546,7 +551,15 @@ app.post('/api/unassign-agent', async (req, res) => {
         product.assigned = false;
       }
     });
-    assignments = assignments.filter(a => a.agentId !== agentId || a.completed);
+    // Mark each assignment for this agent as unassigned rather than removing it.
+    assignments.forEach(a => {
+      if (a.agentId === agentId && !a.completed && !a.unassignedTime) {
+        a.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+        const agentFound = agents.find(ag => ag.id === a.agentId);
+        a.unassignedBy = agentFound ? agentFound.name : 'Unknown';
+        a.wasUnassigned = true;
+      }
+    });
     agent.currentAssignments = [];
     await saveAssignments();
     updateAgentAssignments();
@@ -561,8 +574,15 @@ app.post('/api/unassign-agent', async (req, res) => {
 // Unassign all tasks from all agents.
 app.post('/api/unassign-all', async (req, res) => {
   try {
-    const totalActive = assignments.filter(a => !a.completed).length;
-    assignments = assignments.filter(a => a.completed);
+    const totalActive = assignments.filter(a => !a.completed && !a.unassignedTime).length;
+    assignments.forEach(a => {
+      if (!a.completed && !a.unassignedTime) {
+        a.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+        const agent = agents.find(ag => ag.id === a.agentId);
+        a.unassignedBy = agent ? agent.name : 'Unknown';
+        a.wasUnassigned = true;
+      }
+    });
     products.forEach(p => { p.assigned = false; });
     agents.forEach(a => { a.currentAssignments = []; });
     await saveAssignments();
@@ -615,9 +635,8 @@ app.get('/api/download/unassigned-products', (req, res) => {
 
 // Download previously assigned products as CSV.
 app.get('/api/download/previously-assigned', (req, res) => {
-  // Previously assigned products are those that were assigned and then unassigned.
-  // For this example, we'll consider assignments that are completed.
-  const previouslyAssigned = assignments.filter(a => a.completed);
+  // For this endpoint, we consider assignments that were either completed or unassigned.
+  const previouslyAssigned = assignments.filter(a => a.completed || a.unassignedTime);
   res.setHeader('Content-disposition', 'attachment; filename=previously-assigned.csv');
   res.setHeader('Content-Type', 'text/csv');
   const csvStream = format({ headers: true });
@@ -629,7 +648,9 @@ app.get('/api/download/previously-assigned', (req, res) => {
       agentName: agent ? agent.name : 'Unknown',
       productId: a.productId,
       assignedOn: a.assignedOn,
-      completedOn: a.completedOn
+      completedOn: a.completedOn || '',
+      unassignedTime: a.unassignedTime || '',
+      unassignedBy: a.unassignedBy || ''
     });
   });
   csvStream.end();
