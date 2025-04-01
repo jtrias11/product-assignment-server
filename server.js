@@ -1,37 +1,27 @@
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs-extra');
 const path = require('path');
-const os = require('os');
+const fs = require('fs-extra');
 const csvParser = require('csv-parser');
 const XLSX = require('xlsx');
 
 const app = express();
 
-// Configure CORS for production and development
-const corsOptions = {
-  origin: [
-    'https://your-frontend-app.herokuapp.com', // Replace with your frontend URL
-    'http://localhost:3000',
-    '*' // Remove in production
-  ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-};
-app.use(cors(corsOptions));
+// Configure CORS for all environments
+app.use(cors({
+  origin: '*', // Adjust in production
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+}));
 app.use(express.json());
 
-// In-memory storage (would use a database in production)
-let products = [];
-let agents = [];
-let assignments = [];
-
-// Dynamically set directory paths for cloud deployment
-const productDirectory = process.env.PRODUCT_DIRECTORY || './data';
-const rosterFilePath = process.env.ROSTER_FILE_PATH || './data/Walmart BH Roster.xlsx';
+// Use environment variables for configuration
+const PRODUCT_DIRECTORY = process.env.PRODUCT_DIRECTORY || './data';
+const ROSTER_FILE_PATH = process.env.ROSTER_FILE_PATH || './data/Walmart_BH_Roster.xlsx';
 
 // Ensure data directory exists
-fs.mkdirpSync(productDirectory);
+fs.mkdirpSync(PRODUCT_DIRECTORY);
+
+// Rest of your server.js code remains the same
 
 // Function to load products from CSV
 async function loadProductsFromCSV() {
