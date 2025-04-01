@@ -8,6 +8,7 @@ const csvParser = require('csv-parser');
 const xlsx = require('xlsx');
 const { createReadStream } = require('fs');
 const multer = require('multer');
+// Bull is used if you need asynchronous jobs (optional here)
 const Queue = require('bull');
 
 const app = express();
@@ -17,40 +18,47 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// Setup Bull queue for CSV processing (if needed for other tasks)
+// (Optional) Setup Bull queue if needed
 const csvQueue = new Queue('csvProcessing', {
-  redis: { host: '127.0.0.1', port: 6379 } // Adjust if needed
+  redis: { host: '127.0.0.1', port: 6379 } // Update if necessary
 });
 
-// Data storage for agents, products, and assignments
+// ------------------------------
+// Data Storage
+// ------------------------------
 let agents = [];
 let products = [];
 let assignments = [];
 
-// Lock for handling concurrent assignment requests
-let assignmentInProgress = false;
-
-// Data directories and file paths
+// ------------------------------
+// File Paths and Directories
+// ------------------------------
 const DATA_DIR = path.join(__dirname, 'data');
 const AGENTS_FILE = path.join(DATA_DIR, 'agents.json');
 const ASSIGNMENTS_FILE = path.join(DATA_DIR, 'assignments.json');
-// Define the output CSV file that is now your product data source.
-// (Assuming the file name is "data output.csv" in your project root.)
+
+// The output CSV produced by your separate Python script
 const OUTPUT_CSV = path.join(__dirname, 'data output.csv');
+
+// Roster Excel file for agents
 const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
 
-// Configure Multer to save uploaded CSV files into DATA_DIR using original filename
+// ------------------------------
+// Multer configuration for file uploads (if needed)
+// ------------------------------
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
+  destination: (req, file, cb) => {
     cb(null, DATA_DIR);
   },
-  filename: function (req, file, cb) {
+  filename: (req, file, cb) => {
     cb(null, file.originalname);
   }
 });
-const upload = multer({ storage: storage });
+const upload = multer({ storage });
 
-// Ensure data directory exists
+// ------------------------------
+// Helper Functions
+// ------------------------------
 async function ensureDataDir() {
   try {
     await fs.mkdir(DATA_DIR, { recursive: true });
@@ -60,11 +68,19 @@ async function ensureDataDir() {
   }
 }
 
-// Read products from the output CSV file
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Load products from the output CSV file.
 function readOutputCsv() {
   return new Promise((resolve, reject) => {
     let results = [];
-    // Check if the output CSV file exists
     fs.access(OUTPUT_CSV)
       .then(() => {
         createReadStream(OUTPUT_CSV)
@@ -77,8 +93,8 @@ function readOutputCsv() {
             resolve(results);
           })
           .on('error', (error) => {
-            console.error("Error reading output CSV:", error);
-            resolve([]); // resolve empty if error
+            console.error('Error reading output CSV:', error);
+            resolve([]);
           });
       })
       .catch(() => {
@@ -88,10 +104,10 @@ function readOutputCsv() {
   });
 }
 
-// Read Excel file for agent roster
+// Load agents from the roster Excel file (using column E).
 async function readRosterExcel() {
   try {
-    if (!await fileExists(ROSTER_EXCEL)) {
+    if (!(await fileExists(ROSTER_EXCEL))) {
       console.log('Roster Excel file not found');
       return [];
     }
@@ -124,12 +140,13 @@ async function readRosterExcel() {
       }
     }
     const agentsList = [];
-    // Extract agent names from column E (index 4), skipping header.
+    // Loop through rows (starting at row index 1 to skip header) and get data from column E (index 4)
     for (let row = 1; row <= range.e.r; row++) {
       const cellRef = xlsx.utils.encode_cell({ r: row, c: 4 });
       const cell = worksheet[cellRef];
       if (cell && cell.v && typeof cell.v === 'string' && cell.v.trim() !== '') {
         const name = cell.v.trim();
+        // Ignore header-like rows if present
         if (!['trimmed zoho name', 'name', 'agent name'].includes(name.toLowerCase())) {
           agentsList.push({
             id: agentsList.length + 1,
@@ -141,7 +158,7 @@ async function readRosterExcel() {
         }
       }
     }
-    console.log(`Read ${agentsList.length} agents from Excel roster (column E, skipping header)`);
+    console.log(`Read ${agentsList.length} agents from Excel roster (column E)`);
     return agentsList;
   } catch (error) {
     console.error('Error reading Excel roster:', error);
@@ -149,22 +166,13 @@ async function readRosterExcel() {
   }
 }
 
-// Helper: Check if a file exists
-async function fileExists(filePath) {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// Load data from files or initialize sample data.
-// Now products are loaded from the output CSV.
+// ------------------------------
+// Load Data
+// ------------------------------
 async function loadData() {
   try {
     await ensureDataDir();
-    
+
     // Load agents
     try {
       const agentsData = await fs.readFile(AGENTS_FILE, 'utf8');
@@ -185,15 +193,15 @@ async function loadData() {
         await saveAgents();
       }
     }
-    
-    // Load products from the output CSV.
+
+    // Load products from output CSV.
     try {
       const productsData = await readOutputCsv();
-      // Map the CSV rows to product objects.
-      // Expected columns: abstract_product_id, rule_priority, tenant_id, oldest_created_on, count
+      // Map each row from output CSV to a product object.
+      // Expected CSV columns: abstract_product_id, rule_priority, tenant_id, oldest_created_on, count
       products = productsData.map(row => ({
         id: row.abstract_product_id,
-        // You might not have itemId or name here; set default values if needed.
+        // You can assign default values for missing fields if needed.
         itemId: 0,
         name: "", 
         priority: row.rule_priority,
@@ -207,7 +215,7 @@ async function loadData() {
       console.log('Error loading products from output CSV:', error);
       products = [];
     }
-    
+
     // Load assignments
     try {
       const assignmentsData = await fs.readFile(ASSIGNMENTS_FILE, 'utf8');
@@ -224,7 +232,6 @@ async function loadData() {
   }
 }
 
-// Update agents' currentAssignments based on assignments array
 function updateAgentAssignments() {
   agents.forEach(agent => {
     agent.currentAssignments = [];
@@ -246,7 +253,9 @@ function updateAgentAssignments() {
   });
 }
 
-// Save functions for agents and assignments (products are loaded from CSV output)
+// ------------------------------
+// Save Functions
+// ------------------------------
 async function saveAgents() {
   try {
     await fs.writeFile(AGENTS_FILE, JSON.stringify(agents, null, 2));
@@ -255,6 +264,7 @@ async function saveAgents() {
     console.error('Error saving agents:', error);
   }
 }
+
 async function saveAssignments() {
   try {
     await fs.writeFile(ASSIGNMENTS_FILE, JSON.stringify(assignments, null, 2));
@@ -264,42 +274,26 @@ async function saveAssignments() {
   }
 }
 
+// ------------------------------
 // API Routes
-
-// Health Check
+// ------------------------------
 app.get('/', (req, res) => {
   res.send('Product Assignment Server is running');
 });
+
 app.get('/api/agents', (req, res) => {
   res.json(agents);
 });
+
 app.get('/api/products', (req, res) => {
   res.json(products);
 });
+
 app.get('/api/assignments', (req, res) => {
   res.json(assignments);
 });
 
-// (Other endpoints for assignment, completion, unassignment remain unchanged)
-// For brevity, only the refresh and upload endpoints are modified here.
-
-// Upload endpoint: (if you still want to allow file upload to update output CSV)
-// Here we allow multiple file uploads; note that this endpoint does not process CSVs into output.csv.
-// You must update output.csv separately (or implement a background job) if needed.
-app.post('/api/upload-csv', upload.array('files', 10), async (req, res) => {
-  try {
-    const uploadedFiles = req.files.map(f => f.originalname);
-    console.log(`Uploaded files: ${uploadedFiles.join(', ')}`);
-    // Here you might want to trigger your separate Python process or similar.
-    // For now, we'll assume that output.csv is updated externally.
-    res.status(200).json({ message: 'Files uploaded. Please run your CSV processing script to update output.csv.' });
-  } catch (error) {
-    console.error('Error uploading files:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Refresh endpoint: re-read the output CSV to update products in memory.
+// Refresh endpoint: re-read the output CSV (and agents/assignments as usual)
 app.post('/api/refresh', async (req, res) => {
   try {
     await loadData();
@@ -311,8 +305,21 @@ app.post('/api/refresh', async (req, res) => {
   }
 });
 
-// (Other endpoints for assign, complete, unassign remain unchanged)
-// Example: assign endpoint (unchanged)
+// (Optional) Upload endpoint – if you want to allow file uploads to update CSVs.
+// This example simply accepts file uploads; your process_csv.py script would be run externally.
+app.post('/api/upload-csv', upload.array('files', 10), async (req, res) => {
+  try {
+    const uploadedFiles = req.files.map(f => f.originalname);
+    console.log(`Uploaded files: ${uploadedFiles.join(', ')}`);
+    // Here you could trigger an external process to regenerate output CSV.
+    res.status(200).json({ message: 'Files uploaded. Please update output CSV externally.' });
+  } catch (error) {
+    console.error('Error uploading files:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Example assign endpoint (unchanged)
 app.post('/api/assign', async (req, res) => {
   if (assignmentInProgress) {
     return res.status(409).json({ error: 'Another assignment is in progress, please try again in a moment' });
@@ -342,13 +349,10 @@ app.post('/api/assign', async (req, res) => {
     });
     console.log(`Currently assigned product IDs: ${Array.from(assignedProductIds).join(', ')}`);
     
-    const priorityOrder = { "P1": 0, "P2": 1, "P3": 2 };
+    // Sort available products by createdOn (oldest first)
     const availableProducts = products
       .filter(p => !p.assigned && !assignedProductIds.has(p.id))
-      .sort((a, b) => {
-        // Assuming createdOn is a string in the "YYYY-MM-DD HH:MM:SS" format
-        return new Date(a.createdOn) - new Date(b.createdOn);
-      });
+      .sort((a, b) => new Date(a.createdOn) - new Date(b.createdOn));
     
     if (availableProducts.length === 0) {
       assignmentInProgress = false;
@@ -391,9 +395,11 @@ app.post('/api/assign', async (req, res) => {
   }
 });
 
-// (Other endpoints for complete/unassign remain as before.)
+// (Other endpoints like complete/unassign remain similar as needed.)
 
-// Start the server and load data initially.
+// ------------------------------
+// Start the Server
+// ------------------------------
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
   await loadData();
