@@ -1,250 +1,303 @@
 const express = require('express');
 const cors = require('cors');
+const { v4: uuidv4 } = require('uuid');
+const fs = require('fs').promises;
 const path = require('path');
-const fs = require('fs-extra');
-const csvParser = require('csv-parser');
-const XLSX = require('xlsx');
 
 const app = express();
+const PORT = process.env.PORT || 3001;
 
-// Comprehensive CORS configuration
-app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'https://product-assignment-frontend.onrender.com',
-    '*'
-  ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+// Enable CORS for all routes
+app.use(cors());
 app.use(express.json());
 
-// Directory configuration
-const PRODUCT_DIRECTORY = path.join(__dirname, 'data');
-const ROSTER_FILE_PATH = path.join(__dirname, 'data', 'Walmart BH Roster.xlsx');
-
-// Ensure data directory exists
-fs.mkdirpSync(PRODUCT_DIRECTORY);
-
-// Logging utility
-function log(message, data = null) {
-  const timestamp = new Date().toISOString();
-  console.log(`[${timestamp}] ${message}`, data ? data : '');
-}
-
-// In-memory storage
-let products = [];
+// Data storage
 let agents = [];
+let products = [];
 let assignments = [];
 
-// Function to load products from CSV
-async function loadProductsFromCSV() {
+// Simple in-memory data persistence
+const DATA_DIR = path.join(__dirname, 'data');
+const AGENTS_FILE = path.join(DATA_DIR, 'agents.json');
+const PRODUCTS_FILE = path.join(DATA_DIR, 'products.json');
+const ASSIGNMENTS_FILE = path.join(DATA_DIR, 'assignments.json');
+
+// Ensure data directory exists
+async function ensureDataDir() {
   try {
-    log('Starting CSV product loading process');
-    log('Product Directory:', PRODUCT_DIRECTORY);
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    console.log('Data directory is ready');
+  } catch (error) {
+    console.error('Error creating data directory:', error);
+  }
+}
 
-    // Validate directory
-    if (!await fs.exists(PRODUCT_DIRECTORY)) {
-      log('ERROR: Product directory does not exist');
-      return [];
+// Load data from files or initialize with sample data
+async function loadData() {
+  try {
+    await ensureDataDir();
+    
+    try {
+      const agentsData = await fs.readFile(AGENTS_FILE, 'utf8');
+      agents = JSON.parse(agentsData);
+      console.log(`Loaded ${agents.length} agents from file`);
+    } catch (error) {
+      console.log('No agents file found or error loading, initializing with sample data');
+      // Sample agents
+      agents = [
+        { id: 1, name: "Aaron Dale Yaeso Bandong", role: "Item Review", capacity: 10, currentAssignments: [] },
+        { id: 2, name: "Aaron Marx Lenin Tuban Oriola", role: "Item Review", capacity: 10, currentAssignments: [] },
+        { id: 3, name: "Abel Alicaya Cabugnason", role: "Item Review", capacity: 10, currentAssignments: [] },
+        { id: 4, name: "Adam Paul Medina Baliguat", role: "Item Review", capacity: 10, currentAssignments: [] },
+        { id: 5, name: "Aileen Punsalan Dionisio", role: "Item Review", capacity: 10, currentAssignments: [] },
+        { id: 6, name: "Aileen Sandoval Galicia", role: "Item Review", capacity: 10, currentAssignments: [] },
+        { id: 7, name: "Albert Corpuz Pucyutan", role: "Item Review", capacity: 10, currentAssignments: [] },
+        { id: 8, name: "Albert Mahinay Saligumba", role: "Item Review", capacity: 10, currentAssignments: [] },
+        { id: 9, name: "Aldwin De Vega Morales", role: "Item Review", capacity: 10, currentAssignments: [] },
+        { id: 10, name: "Alexander Panganiban De Leon", role: "Item Review", capacity: 10, currentAssignments: [] },
+        { id: 11, name: "Alexia Muncada Uy", role: "Item Review", capacity: 10, currentAssignments: [] },
+        { id: 12, name: "Allyson Romero Montesclaros", role: "Item Review", capacity: 10, currentAssignments: [] }
+      ];
+      await saveAgents();
     }
-
-    // Get list of CSV files
-    const files = await fs.readdir(PRODUCT_DIRECTORY);
-    const csvFiles = files.filter(file => file.toLowerCase().endsWith('.csv'));
     
-    log('CSV Files found:', csvFiles);
-
-    if (csvFiles.length === 0) {
-      log('No CSV files found in directory');
-      return [];
+    try {
+      const productsData = await fs.readFile(PRODUCTS_FILE, 'utf8');
+      products = JSON.parse(productsData);
+      console.log(`Loaded ${products.length} products from file`);
+    } catch (error) {
+      console.log('No products file found or error loading, initializing with sample data');
+      // Generate 20 sample products
+      products = [];
+      for (let i = 0; i < 20; i++) {
+        const priority = i % 3 === 0 ? "P1" : (i % 3 === 1 ? "P2" : "P3");
+        const itemId = 15847610000 + i;
+        products.push({
+          id: uuidv4().substring(0, 12).toUpperCase(),
+          itemId,
+          name: `Sample Product ${i+1} - ${["Sweater", "Jeans", "T-Shirt", "Jacket", "Dress"][i % 5]} Item`,
+          priority,
+          createdOn: new Date().toISOString().replace('T', ' ').substring(0, 19),
+          assigned: false
+        });
+      }
+      await saveProducts();
     }
     
-    // Process all CSV files
-    const allProducts = [];
-    
-    for (const file of csvFiles) {
-      const filePath = path.join(PRODUCT_DIRECTORY, file);
-      log(`Processing file: ${file}`);
+    try {
+      const assignmentsData = await fs.readFile(ASSIGNMENTS_FILE, 'utf8');
+      assignments = JSON.parse(assignmentsData);
+      console.log(`Loaded ${assignments.length} assignments from file`);
       
-      // Process each CSV file
-      const results = await new Promise((resolve, reject) => {
-        const fileResults = [];
-        
-        fs.createReadStream(filePath)
-          .pipe(csvParser())
-          .on('data', (data) => fileResults.push(data))
-          .on('end', () => {
-            log(`Finished processing ${file}`);
-            resolve(fileResults);
-          })
-          .on('error', (error) => {
-            log(`Error reading ${file}:`, error);
-            reject(error);
-          });
+      // Update agent currentAssignments based on loaded assignments
+      updateAgentAssignments();
+    } catch (error) {
+      console.log('No assignments file found or error loading, initializing with empty array');
+      assignments = [];
+      await saveAssignments();
+    }
+  } catch (error) {
+    console.error('Error loading data:', error);
+  }
+}
+
+// Update agents' currentAssignments based on assignments array
+function updateAgentAssignments() {
+  // Reset all agents' currentAssignments
+  agents.forEach(agent => {
+    agent.currentAssignments = [];
+  });
+  
+  // Update based on assignments
+  assignments.forEach(assignment => {
+    const agent = agents.find(a => a.id === assignment.agentId);
+    const product = products.find(p => p.id === assignment.productId);
+    
+    if (agent && product) {
+      agent.currentAssignments.push({
+        productId: product.id,
+        name: product.name,
+        priority: product.priority
       });
-      
-      // Process results from this file
-      const processedResults = results
-        .filter(row => row['item.abstract_product_id'])
-        .map(row => ({
-          id: row['item.abstract_product_id'],
-          itemId: parseFloat(row['item.item_id']) || 0,
-          name: row['item'] || 'Unknown Item',
-          priority: row['rule.priority'] || 'P3',
-          createdOn: row['sys_created_on'] || new Date().toISOString(),
-          assigned: false,
-          sourceFile: file
-        }));
-      
-      allProducts.push(...processedResults);
     }
-    
-    // Sort all products by creation date
-    allProducts.sort((a, b) => {
-      const dateA = new Date(a.createdOn || 0);
-      const dateB = new Date(b.createdOn || 0);
-      return dateA - dateB;
-    });
-    
-    log(`Processed ${allProducts.length} total products`);
-    return allProducts;
+  });
+}
+
+// Save functions
+async function saveAgents() {
+  try {
+    await fs.writeFile(AGENTS_FILE, JSON.stringify(agents, null, 2));
+    console.log('Agents saved to file');
   } catch (error) {
-    log('CRITICAL ERROR in loadProductsFromCSV:', error);
-    return [];
+    console.error('Error saving agents:', error);
   }
 }
 
-// Function to load agents from Excel
-async function loadAgentsFromExcel() {
+async function saveProducts() {
   try {
-    log('Starting Excel agent loading process');
-    log('Roster File Path:', ROSTER_FILE_PATH);
-
-    if (!await fs.exists(ROSTER_FILE_PATH)) {
-      log('ERROR: Roster file not found');
-      return [];
-    }
-    
-    // Read the Excel file
-    const workbook = XLSX.readFile(ROSTER_FILE_PATH);
-    
-    // Check if "Agents List" sheet exists
-    if (!workbook.SheetNames.includes('Agents List')) {
-      log('ERROR: Agents List sheet not found');
-      return [];
-    }
-    
-    // Get the worksheet
-    const worksheet = workbook.Sheets['Agents List'];
-    
-    // Convert to JSON
-    const data = XLSX.utils.sheet_to_json(worksheet);
-    
-    // Process agents
-    const processedAgents = data
-      .filter(row => row['Status'] === 'Active')
-      .map((row, index) => ({
-        id: index + 1,
-        name: row['Zoho Name'] || 'Unknown Agent',
-        role: row['Role'] || 'Item Review',
-        capacity: 10,
-        currentAssignments: []
-      }));
-    
-    log(`Processed ${processedAgents.length} agents`);
-    return processedAgents;
+    await fs.writeFile(PRODUCTS_FILE, JSON.stringify(products, null, 2));
+    console.log('Products saved to file');
   } catch (error) {
-    log('CRITICAL ERROR in loadAgentsFromExcel:', error);
-    return [];
+    console.error('Error saving products:', error);
   }
 }
 
-// API endpoints
-app.get('/api/products', async (req, res) => {
+async function saveAssignments() {
   try {
-    log('Products API endpoint called');
-    products = await loadProductsFromCSV();
-    res.json(products);
+    await fs.writeFile(ASSIGNMENTS_FILE, JSON.stringify(assignments, null, 2));
+    console.log('Assignments saved to file');
   } catch (error) {
-    log('Error in products endpoint:', error);
-    res.status(500).json({ 
-      error: 'Failed to load products', 
-      details: error.toString() 
-    });
+    console.error('Error saving assignments:', error);
   }
+}
+
+// API Routes
+// Root route for health check
+app.get('/', (req, res) => {
+  res.send('Product Assignment Server is running');
 });
 
-app.get('/api/agents', async (req, res) => {
-  try {
-    log('Agents API endpoint called');
-    agents = await loadAgentsFromExcel();
-    res.json(agents);
-  } catch (error) {
-    log('Error in agents endpoint:', error);
-    res.status(500).json({ 
-      error: 'Failed to load agents', 
-      details: error.toString() 
-    });
-  }
+// Get all agents
+app.get('/api/agents', (req, res) => {
+  res.json(agents);
 });
 
+// Get all products
+app.get('/api/products', (req, res) => {
+  res.json(products);
+});
+
+// Get all assignments
 app.get('/api/assignments', (req, res) => {
   res.json(assignments);
 });
 
-// Manual refresh endpoint
-app.post('/api/refresh-data', async (req, res) => {
+// Assign a task to an agent
+app.post('/api/assign', async (req, res) => {
   try {
-    log('Manual data refresh initiated');
-    products = await loadProductsFromCSV();
-    agents = await loadAgentsFromExcel();
+    const { agentId } = req.body;
     
-    res.json({ 
-      success: true, 
-      message: 'Data refreshed successfully',
-      productCount: products.length,
-      agentCount: agents.length
+    if (!agentId) {
+      return res.status(400).json({ error: 'Agent ID is required' });
+    }
+    
+    const agent = agents.find(a => a.id === agentId);
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+    
+    if (agent.currentAssignments.length >= agent.capacity) {
+      return res.status(400).json({ error: 'Agent has reached maximum capacity' });
+    }
+    
+    // Find an unassigned product with highest priority
+    const priorityOrder = { "P1": 0, "P2": 1, "P3": 2 };
+    const availableProducts = products
+      .filter(p => !p.assigned)
+      .sort((a, b) => {
+        // First sort by priority
+        const priorityDiff = priorityOrder[a.priority] - priorityOrder[b.priority];
+        if (priorityDiff !== 0) return priorityDiff;
+        
+        // Then sort by creation date (oldest first)
+        return new Date(a.createdOn) - new Date(b.createdOn);
+      });
+    
+    if (availableProducts.length === 0) {
+      return res.status(404).json({ error: 'No available products to assign' });
+    }
+    
+    const productToAssign = availableProducts[0];
+    
+    // Update product status
+    productToAssign.assigned = true;
+    
+    // Create assignment
+    const assignment = {
+      id: uuidv4(),
+      agentId: agent.id,
+      productId: productToAssign.id,
+      assignedOn: new Date().toISOString().replace('T', ' ').substring(0, 19)
+    };
+    
+    assignments.push(assignment);
+    
+    // Update agent's current assignments
+    agent.currentAssignments.push({
+      productId: productToAssign.id,
+      name: productToAssign.name,
+      priority: productToAssign.priority
+    });
+    
+    // Save changes
+    await saveProducts();
+    await saveAssignments();
+    await saveAgents();
+    
+    res.status(200).json({ 
+      message: `Task ${productToAssign.id} assigned to ${agent.name}`,
+      assignment
     });
   } catch (error) {
-    log('Error during manual refresh:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to refresh data',
-      error: error.toString()
-    });
+    console.error('Error assigning task:', error);
+    res.status(500).json({ error: `Server error: ${error.message}` });
   }
 });
 
-// Root endpoint for health check
-app.get('/', (req, res) => {
-  res.json({
-    status: 'Server is running',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development',
-    productDirectory: PRODUCT_DIRECTORY,
-    rosterFilePath: ROSTER_FILE_PATH
-  });
+// Complete a task
+app.post('/api/complete', async (req, res) => {
+  try {
+    const { agentId, productId } = req.body;
+    
+    if (!agentId || !productId) {
+      return res.status(400).json({ error: 'Agent ID and Product ID are required' });
+    }
+    
+    const agent = agents.find(a => a.id === agentId);
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+    
+    const assignmentIndex = assignments.findIndex(
+      a => a.agentId === agentId && a.productId === productId
+    );
+    
+    if (assignmentIndex === -1) {
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+    
+    // Remove the assignment
+    assignments.splice(assignmentIndex, 1);
+    
+    // Update agent's current assignments
+    agent.currentAssignments = agent.currentAssignments.filter(
+      task => task.productId !== productId
+    );
+    
+    // Update product (mark as completed, we'll keep it in the system but no longer assigned)
+    const product = products.find(p => p.id === productId);
+    if (product) {
+      product.assigned = false;
+      product.completed = true;
+    }
+    
+    // Save changes
+    await saveProducts();
+    await saveAssignments();
+    await saveAgents();
+    
+    res.status(200).json({ 
+      message: `Task ${productId} completed by ${agent.name}`,
+    });
+  } catch (error) {
+    console.error('Error completing task:', error);
+    res.status(500).json({ error: `Server error: ${error.message}` });
+  }
 });
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  log('Unhandled Error:', err);
-  res.status(500).json({ 
-    error: 'Something went wrong!',
-    message: err.message 
-  });
-});
-
-// Flexible port configuration
-const PORT = process.env.PORT || 3001;
-const HOST = process.env.HOST || '0.0.0.0';
 
 // Start the server
-const server = app.listen(PORT, HOST, () => {
-  log(`Server running on:`);
-  log(`- http://localhost:${PORT}`);
-  log(`- http://${HOST}:${PORT}`);
+app.listen(PORT, async () => {
+  console.log(`Server running on port ${PORT}`);
+  await loadData();
+  console.log('Server is ready to handle requests');
 });
-
-module.exports = { app, server }; // Export for potential testing
