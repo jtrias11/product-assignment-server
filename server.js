@@ -9,6 +9,7 @@
  *   complete tasks (including complete all tasks per agent),
  *   unassign tasks (which now marks assignments as unassigned rather than removing them),
  *   and download CSVs for completed/unassigned items.
+ * - New GET endpoints for previously assigned tasks and complete product queue.
  ***************************************************************/
 
 const express = require('express');
@@ -281,16 +282,27 @@ app.get('/api/agents', (req, res) => { res.json(agents); });
 app.get('/api/products', (req, res) => { res.json(products); });
 app.get('/api/assignments', (req, res) => { res.json(assignments); });
 
-// Endpoint to get completed assignments
+// GET endpoint for completed assignments
 app.get('/api/completed-assignments', (req, res) => {
   const completed = assignments.filter(a => a.completed);
   res.json(completed);
 });
 
-// Endpoint to get unassigned products
+// GET endpoint for unassigned products
 app.get('/api/unassigned-products', (req, res) => {
   const unassigned = products.filter(p => !p.assigned);
   res.json(unassigned);
+});
+
+// NEW GET endpoint for previously assigned tasks (completed or unassigned)
+app.get('/api/previously-assigned', (req, res) => {
+  const prev = assignments.filter(a => a.completed || a.unassignedTime);
+  res.json(prev);
+});
+
+// NEW GET endpoint for complete product queue
+app.get('/api/queue', (req, res) => {
+  res.json(products);
 });
 
 // ------------------------------
@@ -438,7 +450,7 @@ app.post('/api/complete', async (req, res) => {
       return res.status(404).json({ error: 'Agent not found' });
     }
     const assignmentIndex = assignments.findIndex(a =>
-      a.agentId === agentId && a.productId === productId && !a.completed
+      a.agentId === agentId && a.productId === productId && !a.completed && !a.unassignedTime
     );
     if (assignmentIndex === -1) {
       return res.status(404).json({ error: 'Active assignment not found' });
@@ -449,7 +461,6 @@ app.post('/api/complete', async (req, res) => {
     if (product) {
       product.assigned = false;
     }
-    // Remove from agent.currentAssignments (updateAgentAssignments will handle active tasks)
     await saveAssignments();
     updateAgentAssignments();
     await saveAgents();
@@ -460,9 +471,7 @@ app.post('/api/complete', async (req, res) => {
   }
 });
 
-// ------------------------------
-// New Endpoint: Complete All Tasks for Agent
-// ------------------------------
+// NEW Endpoint: Complete All Tasks for Agent
 app.post('/api/complete-all-agent', async (req, res) => {
   try {
     const { agentId } = req.body;
@@ -511,7 +520,7 @@ app.post('/api/unassign-product', async (req, res) => {
       if (agent) {
         agent.currentAssignments = agent.currentAssignments.filter(task => task.productId !== productId);
       }
-      // Instead of removing, mark the assignment as unassigned.
+      // Mark the assignment as unassigned.
       assignment.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
       assignment.unassignedBy = agent ? agent.name : 'Unknown';
       assignment.wasUnassigned = true;
@@ -551,7 +560,6 @@ app.post('/api/unassign-agent', async (req, res) => {
         product.assigned = false;
       }
     });
-    // Mark each assignment for this agent as unassigned rather than removing it.
     assignments.forEach(a => {
       if (a.agentId === agentId && !a.completed && !a.unassignedTime) {
         a.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
@@ -635,7 +643,7 @@ app.get('/api/download/unassigned-products', (req, res) => {
 
 // Download previously assigned products as CSV.
 app.get('/api/download/previously-assigned', (req, res) => {
-  // For this endpoint, we consider assignments that were either completed or unassigned.
+  // Previously assigned products are those that were either completed or unassigned.
   const previouslyAssigned = assignments.filter(a => a.completed || a.unassignedTime);
   res.setHeader('Content-disposition', 'attachment; filename=previously-assigned.csv');
   res.setHeader('Content-Type', 'text/csv');
