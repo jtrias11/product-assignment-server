@@ -39,112 +39,83 @@ async function ensureDataDir() {
   }
 }
 
-// Function to read CSV files from the data directory
-function readCsvFiles() {
-  return new Promise(async (resolve, reject) => {
-    try {
-      const files = await fs.readdir(DATA_DIR);
-      const csvFiles = files.filter(file => file.toLowerCase().endsWith('.csv'));
-      
-      if (csvFiles.length === 0) {
-        console.log('No CSV files found in data directory');
-        return resolve([]);
-      }
-      
-      let allProducts = [];
-      let completedFiles = 0;
-      let abstractIdCounts = {}; // To track counts of each abstract ID
-      let skippedRows = 0; // To track how many rows were skipped
-      
-      for (const file of csvFiles) {
+// Updated readCsvFiles function that processes all CSV files concurrently
+async function readCsvFiles() {
+  try {
+    const files = await fs.readdir(DATA_DIR);
+    const csvFiles = files.filter(file => file.toLowerCase().endsWith('.csv'));
+
+    if (csvFiles.length === 0) {
+      console.log('No CSV files found in data directory');
+      return [];
+    }
+
+    // Process all CSV files concurrently.
+    const results = await Promise.all(csvFiles.map(file => {
+      return new Promise((resolve, reject) => {
         const filePath = path.join(DATA_DIR, file);
         const fileProducts = [];
+        let rowCount = 0;
         
         createReadStream(filePath)
           .pipe(csv())
           .on('data', (data) => {
-            // Log column names from the first row for debugging
-            if (fileProducts.length === 0) {
-              console.log(`CSV column names in ${file}:`, Object.keys(data));
-            }
-            
-            // Try various field names to get the abstract product ID
+            rowCount++;
+            // Use the correct field name for the abstract id.
             let productId = data['item.abstract_product_id'] || null;
-            if (!productId) {
-              if (data.item && data.item.abstract_product_id) {
-                productId = data.item.abstract_product_id;
-              } else if (data.abstract_product_id) {
-                productId = data.abstract_product_id;
-              } else if (data.AbstractID) {
-                productId = data.AbstractID;
-              } else if (data['Abstract ID']) {
-                productId = data['Abstract ID'];
-              } else if (data.abstract_id) {
-                productId = data.abstract_id;
-              }
-            }
-            
-            // Skip rows with blank Abstract IDs
             if (!productId || productId.trim() === '') {
-              skippedRows++;
-              if (skippedRows % 100 === 0) {
-                console.log(`Skipped ${skippedRows} rows with blank Abstract ID`);
-              }
-              return;
+              return; // Skip rows with blank abstract id.
             }
-            
-            // Track counts of each abstract ID
-            abstractIdCounts[productId] = (abstractIdCounts[productId] || 0) + 1;
-            
-            const priority = data['rule.priority'] || data.priority || 'P3';
-            const tenantId = data.tenant_id || data.TenantID || data['Tenant ID'] || '';
-            const createdOn = data.sys_created_on || data.created_on || data.CreatedOn ||
-                             new Date().toISOString().replace('T', ' ').substring(0, 19);
-            const name = data.ItemName || data.Name || data.name || data.Description || 'Unknown Product';
-            const itemId = parseInt(data.ItemID || data.item_id || 0);
-            
+            // Build a product object.
             const product = {
               id: productId,
-              itemId,
-              name,
-              priority,
-              createdOn,
-              tenantId,
+              itemId: parseInt(data.ItemID || data.item_id || 0),
+              name: data.ItemName || data.Name || data.name || data.Description || 'Unknown Product',
+              priority: data['rule.priority'] || data.priority || 'P3',
+              createdOn: data.sys_created_on || data.created_on || data.CreatedOn ||
+                         new Date().toISOString().replace('T', ' ').substring(0, 19),
+              tenantId: data.tenant_id || data.TenantID || data['Tenant ID'] || '',
               assigned: false
             };
             fileProducts.push(product);
           })
           .on('end', () => {
-            console.log(`Read ${fileProducts.length} products from ${file}`);
-            allProducts = [...allProducts, ...fileProducts];
-            completedFiles++;
-            
-            if (completedFiles === csvFiles.length) {
-              // Add count to each product
-              allProducts.forEach(product => {
-                product.count = abstractIdCounts[product.id] || 1;
-              });
-              console.log(`Total products loaded from CSVs: ${allProducts.length}`);
-              console.log(`Total rows skipped (blank Abstract ID): ${skippedRows}`);
-              resolve(allProducts);
-            }
+            console.log(`File ${file} processed: ${fileProducts.length} valid rows (out of ${rowCount} rows)`);
+            resolve(fileProducts);
           })
           .on('error', (error) => {
             console.error(`Error reading CSV file ${file}:`, error);
-            completedFiles++;
-            if (completedFiles === csvFiles.length) {
-              resolve(allProducts);
-            }
+            resolve([]); // Resolve with an empty array on error.
           });
-      }
-    } catch (error) {
-      console.error('Error reading CSV files:', error);
-      resolve([]);
+      });
+    }));
+
+    // Combine results from all files.
+    let allProducts = results.flat();
+
+    // Aggregate products by unique abstract id.
+    const abstractIdCounts = {};
+    for (const product of allProducts) {
+      abstractIdCounts[product.id] = (abstractIdCounts[product.id] || 0) + 1;
     }
-  });
+    // Keep only one product per unique id and attach the count.
+    const uniqueProducts = {};
+    for (const product of allProducts) {
+      if (!uniqueProducts[product.id]) {
+        uniqueProducts[product.id] = product;
+        uniqueProducts[product.id].count = abstractIdCounts[product.id];
+      }
+    }
+    const finalProducts = Object.values(uniqueProducts);
+    console.log(`Total unique products loaded from CSVs: ${finalProducts.length}`);
+    return finalProducts;
+  } catch (error) {
+    console.error('Error reading CSV files:', error);
+    return [];
+  }
 }
 
-// Function to read Excel roster file specifically looking for the "Agents List" sheet and column E
+// Function to read Excel roster file (agents)
 async function readRosterExcel() {
   try {
     if (!await fileExists(ROSTER_EXCEL)) {
@@ -219,7 +190,7 @@ async function fileExists(filePath) {
   }
 }
 
-// Load data from files or initialize with imported/sample data
+// Load data from files or initialize with sample data
 async function loadData() {
   try {
     await ensureDataDir();
@@ -349,15 +320,12 @@ async function saveAssignments() {
 app.get('/', (req, res) => {
   res.send('Product Assignment Server is running');
 });
-
 app.get('/api/agents', (req, res) => {
   res.json(agents);
 });
-
 app.get('/api/products', (req, res) => {
   res.json(products);
 });
-
 app.get('/api/assignments', (req, res) => {
   res.json(assignments);
 });
@@ -600,7 +568,7 @@ app.post('/api/unassign-product', async (req, res) => {
   }
 });
 
-// NEW: Refresh endpoint to re-read data from files
+// Refresh endpoint to re-read data from files
 app.post('/api/refresh', async (req, res) => {
   try {
     await loadData();
