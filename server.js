@@ -7,31 +7,32 @@ const XLSX = require('xlsx');
 
 const app = express();
 
-// Configure CORS for development and production
+// Comprehensive CORS configuration
 app.use(cors({
   origin: [
-    'http://localhost:3000',  // Local React frontend
-    'https://product-assignment-frontend.onrender.com',  // Production frontend
-    '*'  // Be cautious with this in production
+    'http://localhost:3000',
+    'https://product-assignment-frontend.onrender.com',
+    '*'
   ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
 
-// Flexible directory configuration with absolute path
+// Directory configuration
 const PRODUCT_DIRECTORY = path.join(__dirname, 'data');
 const ROSTER_FILE_PATH = path.join(__dirname, 'data', 'Walmart BH Roster.xlsx');
 
 // Ensure data directory exists
 fs.mkdirpSync(PRODUCT_DIRECTORY);
 
-// Comprehensive logging utility
+// Logging utility
 function log(message, data = null) {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] ${message}`, data ? data : '');
 }
 
-// In-memory storage (would use a database in production)
+// In-memory storage
 let products = [];
 let agents = [];
 let assignments = [];
@@ -159,7 +160,7 @@ async function loadAgentsFromExcel() {
   }
 }
 
-// API endpoints with comprehensive error handling
+// API endpoints
 app.get('/api/products', async (req, res) => {
   try {
     log('Products API endpoint called');
