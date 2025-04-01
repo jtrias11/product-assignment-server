@@ -3,6 +3,9 @@ const cors = require('cors');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs').promises;
 const path = require('path');
+const csv = require('csv-parser');
+const xlsx = require('xlsx');
+const { createReadStream } = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -16,11 +19,12 @@ let agents = [];
 let products = [];
 let assignments = [];
 
-// Simple in-memory data persistence
+// Data directories and files
 const DATA_DIR = path.join(__dirname, 'data');
 const AGENTS_FILE = path.join(DATA_DIR, 'agents.json');
 const PRODUCTS_FILE = path.join(DATA_DIR, 'products.json');
 const ASSIGNMENTS_FILE = path.join(DATA_DIR, 'assignments.json');
+const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
 
 // Ensure data directory exists
 async function ensureDataDir() {
@@ -32,58 +36,174 @@ async function ensureDataDir() {
   }
 }
 
-// Load data from files or initialize with sample data
+// Function to read CSV files from the data directory
+function readCsvFiles() {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const files = await fs.readdir(DATA_DIR);
+      const csvFiles = files.filter(file => file.toLowerCase().endsWith('.csv'));
+      
+      if (csvFiles.length === 0) {
+        console.log('No CSV files found in data directory');
+        return resolve([]);
+      }
+      
+      let allProducts = [];
+      let completedFiles = 0;
+      
+      for (const file of csvFiles) {
+        const filePath = path.join(DATA_DIR, file);
+        const fileProducts = [];
+        
+        createReadStream(filePath)
+          .pipe(csv())
+          .on('data', (data) => {
+            // Adjust field mapping based on your CSV structure
+            // This assumes your CSV has columns like id, itemId, name, priority, etc.
+            const product = {
+              id: data.id || uuidv4().substring(0, 12).toUpperCase(),
+              itemId: parseInt(data.itemId || data.item_id || 0),
+              name: data.name || data.product_name || data.description || 'Unknown Product',
+              priority: data.priority || 'P3',
+              createdOn: data.createdOn || data.created_on || new Date().toISOString().replace('T', ' ').substring(0, 19),
+              assigned: false
+            };
+            fileProducts.push(product);
+          })
+          .on('end', () => {
+            console.log(`Read ${fileProducts.length} products from ${file}`);
+            allProducts = [...allProducts, ...fileProducts];
+            completedFiles++;
+            
+            if (completedFiles === csvFiles.length) {
+              console.log(`Total products loaded from CSVs: ${allProducts.length}`);
+              resolve(allProducts);
+            }
+          })
+          .on('error', (error) => {
+            console.error(`Error reading CSV file ${file}:`, error);
+            completedFiles++;
+            if (completedFiles === csvFiles.length) {
+              resolve(allProducts);
+            }
+          });
+      }
+    } catch (error) {
+      console.error('Error reading CSV files:', error);
+      resolve([]);
+    }
+  });
+}
+
+// Function to read Excel roster file
+async function readRosterExcel() {
+  try {
+    if (!await fileExists(ROSTER_EXCEL)) {
+      console.log('Roster Excel file not found');
+      return [];
+    }
+    
+    const workbook = xlsx.readFile(ROSTER_EXCEL);
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+    const data = xlsx.utils.sheet_to_json(worksheet);
+    
+    // Map Excel data to agent structure
+    // Adjust the field mapping based on your Excel structure
+    const agents = data.map((row, index) => {
+      return {
+        id: index + 1,
+        name: row.Name || row.name || row.AGENT || row.agent || 'Unknown Agent',
+        role: row.Role || row.role || row.ROLE || 'Item Review',
+        capacity: parseInt(row.Capacity || row.capacity || 10),
+        currentAssignments: []
+      };
+    });
+    
+    console.log(`Read ${agents.length} agents from Excel roster`);
+    return agents;
+  } catch (error) {
+    console.error('Error reading Excel roster:', error);
+    return [];
+  }
+}
+
+// Helper function to check if a file exists
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Load data from files or initialize with imported/sample data
 async function loadData() {
   try {
     await ensureDataDir();
     
+    // Try to load agents from JSON file first
     try {
       const agentsData = await fs.readFile(AGENTS_FILE, 'utf8');
       agents = JSON.parse(agentsData);
-      console.log(`Loaded ${agents.length} agents from file`);
+      console.log(`Loaded ${agents.length} agents from JSON file`);
     } catch (error) {
-      console.log('No agents file found or error loading, initializing with sample data');
-      // Sample agents
-      agents = [
-        { id: 1, name: "Aaron Dale Yaeso Bandong", role: "Item Review", capacity: 10, currentAssignments: [] },
-        { id: 2, name: "Aaron Marx Lenin Tuban Oriola", role: "Item Review", capacity: 10, currentAssignments: [] },
-        { id: 3, name: "Abel Alicaya Cabugnason", role: "Item Review", capacity: 10, currentAssignments: [] },
-        { id: 4, name: "Adam Paul Medina Baliguat", role: "Item Review", capacity: 10, currentAssignments: [] },
-        { id: 5, name: "Aileen Punsalan Dionisio", role: "Item Review", capacity: 10, currentAssignments: [] },
-        { id: 6, name: "Aileen Sandoval Galicia", role: "Item Review", capacity: 10, currentAssignments: [] },
-        { id: 7, name: "Albert Corpuz Pucyutan", role: "Item Review", capacity: 10, currentAssignments: [] },
-        { id: 8, name: "Albert Mahinay Saligumba", role: "Item Review", capacity: 10, currentAssignments: [] },
-        { id: 9, name: "Aldwin De Vega Morales", role: "Item Review", capacity: 10, currentAssignments: [] },
-        { id: 10, name: "Alexander Panganiban De Leon", role: "Item Review", capacity: 10, currentAssignments: [] },
-        { id: 11, name: "Alexia Muncada Uy", role: "Item Review", capacity: 10, currentAssignments: [] },
-        { id: 12, name: "Allyson Romero Montesclaros", role: "Item Review", capacity: 10, currentAssignments: [] }
-      ];
-      await saveAgents();
+      console.log('No agents JSON file found, trying to import from Excel roster');
+      
+      // Try to import from Excel roster
+      const excelAgents = await readRosterExcel();
+      
+      if (excelAgents.length > 0) {
+        agents = excelAgents;
+        await saveAgents();
+      } else {
+        console.log('Excel import failed, initializing with sample agent data');
+        // Sample agents as fallback
+        agents = [
+          { id: 1, name: "Aaron Dale Yaeso Bandong", role: "Item Review", capacity: 10, currentAssignments: [] },
+          { id: 2, name: "Aaron Marx Lenin Tuban Oriola", role: "Item Review", capacity: 10, currentAssignments: [] },
+          // More sample agents...
+        ];
+        await saveAgents();
+      }
     }
     
+    // Try to load products from JSON file first
     try {
       const productsData = await fs.readFile(PRODUCTS_FILE, 'utf8');
       products = JSON.parse(productsData);
-      console.log(`Loaded ${products.length} products from file`);
+      console.log(`Loaded ${products.length} products from JSON file`);
     } catch (error) {
-      console.log('No products file found or error loading, initializing with sample data');
-      // Generate 20 sample products
-      products = [];
-      for (let i = 0; i < 20; i++) {
-        const priority = i % 3 === 0 ? "P1" : (i % 3 === 1 ? "P2" : "P3");
-        const itemId = 15847610000 + i;
-        products.push({
-          id: uuidv4().substring(0, 12).toUpperCase(),
-          itemId,
-          name: `Sample Product ${i+1} - ${["Sweater", "Jeans", "T-Shirt", "Jacket", "Dress"][i % 5]} Item`,
-          priority,
-          createdOn: new Date().toISOString().replace('T', ' ').substring(0, 19),
-          assigned: false
-        });
+      console.log('No products JSON file found, trying to import from CSV files');
+      
+      // Try to import from CSV files
+      const csvProducts = await readCsvFiles();
+      
+      if (csvProducts.length > 0) {
+        products = csvProducts;
+        await saveProducts();
+      } else {
+        console.log('CSV import failed, initializing with sample product data');
+        // Generate sample products as fallback
+        products = [];
+        for (let i = 0; i < 20; i++) {
+          const priority = i % 3 === 0 ? "P1" : (i % 3 === 1 ? "P2" : "P3");
+          const itemId = 15847610000 + i;
+          products.push({
+            id: uuidv4().substring(0, 12).toUpperCase(),
+            itemId,
+            name: `Sample Product ${i+1} - ${["Sweater", "Jeans", "T-Shirt", "Jacket", "Dress"][i % 5]} Item`,
+            priority,
+            createdOn: new Date().toISOString().replace('T', ' ').substring(0, 19),
+            assigned: false
+          });
+        }
+        await saveProducts();
       }
-      await saveProducts();
     }
     
+    // Load assignments
     try {
       const assignmentsData = await fs.readFile(ASSIGNMENTS_FILE, 'utf8');
       assignments = JSON.parse(assignmentsData);
@@ -92,7 +212,7 @@ async function loadData() {
       // Update agent currentAssignments based on loaded assignments
       updateAgentAssignments();
     } catch (error) {
-      console.log('No assignments file found or error loading, initializing with empty array');
+      console.log('No assignments file found, initializing with empty array');
       assignments = [];
       await saveAssignments();
     }
