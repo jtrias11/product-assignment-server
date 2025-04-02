@@ -3,13 +3,11 @@
  * 
  * Features:
  * - Loads agents from "Walmart BH Roster.xlsx" (column E).
- * - Loads products from "output.csv" (columns: 
- *   item.abstract_product_id, abstract_product_id, rule_priority, tenant_id, oldest_created_on, count).
- * - Provides endpoints to refresh data, upload output.csv, assign tasks,
+ * - Loads products from "output.csv" (using abstract_product_id as primary).
+ * - Provides endpoints to refresh data, upload CSV (merging data), assign tasks,
  *   complete tasks (including complete all tasks per agent),
  *   unassign tasks (which now marks assignments as unassigned rather than removing them),
- *   and download CSVs for completed/unassigned items.
- * - New GET endpoints for previously assigned tasks and complete product queue.
+ *   and download CSVs for completed, unassigned, and full queue.
  ***************************************************************/
 
 const express = require('express');
@@ -21,7 +19,7 @@ const csvParser = require('csv-parser');
 const xlsx = require('xlsx');
 const { createReadStream, createWriteStream } = require('fs');
 const multer = require('multer');
-const { format } = require('@fast-csv/format'); // for CSV download endpoints
+const { format } = require('@fast-csv/format');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -42,14 +40,12 @@ let assignments = [];
 const DATA_DIR = path.join(__dirname, 'data');
 const AGENTS_FILE = path.join(DATA_DIR, 'agents.json');
 const ASSIGNMENTS_FILE = path.join(DATA_DIR, 'assignments.json');
-// Master output CSV (merged file)
 const OUTPUT_CSV = path.join(DATA_DIR, 'output.csv');
 const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
 
 // ------------------------------
 // Multer Configuration
 // ------------------------------
-// Save uploaded file with a unique filename so we can merge it later
 const storage = multer.diskStorage({
   destination: (req, file, cb) => { cb(null, DATA_DIR); },
   filename: (req, file, cb) => { cb(null, Date.now() + '-' + file.originalname); }
@@ -117,32 +113,20 @@ async function readRosterExcel() {
     console.log('Excel sheet names:', workbook.SheetNames);
     let sheetName = "Agents List";
     if (!workbook.SheetNames.includes(sheetName)) {
-      console.log('Sheet "Agents List" not found, checking alternatives...');
       const possibleSheetNames = ["Agents", "AgentsList", "Agents_List", "Agent List", "Agent_List"];
       for (const name of possibleSheetNames) {
         if (workbook.SheetNames.includes(name)) {
           sheetName = name;
-          console.log(`Found sheet "${name}" instead`);
           break;
         }
       }
       if (!workbook.SheetNames.includes(sheetName)) {
         sheetName = workbook.SheetNames[0];
-        console.log(`Using first available sheet: "${sheetName}"`);
       }
     }
     const worksheet = workbook.Sheets[sheetName];
     const range = xlsx.utils.decode_range(worksheet['!ref']);
-    console.log('Analyzing Excel sheet structure:');
-    for (let c = 0; c <= Math.min(range.e.c, 10); c++) {
-      const headerRef = xlsx.utils.encode_cell({ r: 0, c });
-      const headerCell = worksheet[headerRef];
-      if (headerCell) {
-        console.log(`Column ${String.fromCharCode(65 + c)} (${c}): ${headerCell.v}`);
-      }
-    }
     const agentsList = [];
-    // Read column E (index 4), ignoring blanks.
     for (let row = 1; row <= range.e.r; row++) {
       const cellRef = xlsx.utils.encode_cell({ r: row, c: 4 });
       const cell = worksheet[cellRef];
@@ -173,7 +157,7 @@ async function readRosterExcel() {
 async function loadData() {
   try {
     await ensureDataDir();
-    // 1. Load agents from JSON (if available) or Excel.
+    // Load agents
     try {
       const agentsData = await fs.readFile(AGENTS_FILE, 'utf8');
       agents = JSON.parse(agentsData);
@@ -185,7 +169,6 @@ async function loadData() {
         agents = excelAgents;
         await saveAgents();
       } else {
-        console.log('Excel import failed, using sample agent data');
         agents = [
           { id: 1, name: "Agent Sample 1", role: "Item Review", capacity: 10, currentAssignments: [] },
           { id: 2, name: "Agent Sample 2", role: "Item Review", capacity: 10, currentAssignments: [] }
@@ -193,26 +176,25 @@ async function loadData() {
         await saveAgents();
       }
     }
-    // 2. Load products from output.csv.
+    // Load products from CSV
     try {
       const csvRows = await readOutputCsv();
       products = csvRows.map(row => ({
-        id: row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'],
-        name: "", // update if you have a product name column
+        id: row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id,
+        name: row.product_name || "",
         priority: row.rule_priority || row.priority,
         tenantId: row.tenant_id,
         createdOn: row.oldest_created_on || row.sys_created_on || row.created_on,
         count: row.count,
         assigned: false
       }));
-      // Filter out any products with null or undefined ID
       products = products.filter(p => p.id);
       console.log(`Loaded ${products.length} products from output CSV`);
     } catch (error) {
       console.log('Error loading products from output CSV:', error);
       products = [];
     }
-    // 3. Load assignments from file.
+    // Load assignments
     try {
       const assignmentsData = await fs.readFile(ASSIGNMENTS_FILE, 'utf8');
       assignments = JSON.parse(assignmentsData);
@@ -228,7 +210,6 @@ async function loadData() {
   }
 }
 
-// Update agent assignments so that only active tasks (not completed or unassigned) appear.
 function updateAgentAssignments() {
   agents.forEach(agent => { agent.currentAssignments = []; });
   assignments.forEach(assignment => {
@@ -282,36 +263,45 @@ app.get('/api/agents', (req, res) => { res.json(agents); });
 app.get('/api/products', (req, res) => { res.json(products); });
 app.get('/api/assignments', (req, res) => { res.json(assignments); });
 
-// GET endpoint for completed assignments
+// Completed assignments endpoint
 app.get('/api/completed-assignments', (req, res) => {
   const completed = assignments.filter(a => a.completed);
   res.json(completed);
 });
 
-// GET endpoint for unassigned products
+// Unassigned products endpoint
 app.get('/api/unassigned-products', (req, res) => {
   const unassigned = products.filter(p => !p.assigned);
   res.json(unassigned);
 });
 
-// NEW GET endpoint for previously assigned tasks (completed or unassigned)
+// Previously assigned (unassigned or completed) endpoint
 app.get('/api/previously-assigned', (req, res) => {
-  const prev = assignments.filter(a => a.completed || a.unassignedTime);
+  // Map assignments to include correct product data
+  const prev = assignments.filter(a => a.completed || a.unassignedTime).map(a => {
+    const product = products.find(p => p.id === a.productId);
+    return {
+      id: product ? product.id : a.productId,
+      count: product ? product.count : '',
+      tenantId: product ? product.tenantId : '',
+      priority: product ? product.priority : '',
+      createdOn: product ? product.createdOn : '',
+      unassignedTime: a.unassignedTime || '',
+      unassignedBy: a.unassignedBy || ''
+    };
+  });
   res.json(prev);
 });
 
-// NEW GET endpoint for complete product queue
+// Queue endpoint: return all products
 app.get('/api/queue', (req, res) => {
   res.json(products);
 });
 
-// ------------------------------
 // File Upload Endpoint (Merge CSV)
-// ------------------------------
 app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => {
   try {
     console.log('File upload received:', req.file);
-    // Read the new CSV data from the uploaded file
     const newData = await new Promise((resolve, reject) => {
       const results = [];
       createReadStream(req.file.path)
@@ -320,8 +310,6 @@ app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => 
         .on('end', () => resolve(results))
         .on('error', reject);
     });
-
-    // Read existing CSV data if the master output CSV exists
     let existingData = [];
     if (await fileExists(OUTPUT_CSV)) {
       existingData = await new Promise((resolve, reject) => {
@@ -333,34 +321,24 @@ app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => 
           .on('error', reject);
       });
     }
-
-    // Merge newData with existingData based on a unique product identifier.
     const mergedDataMap = new Map();
-    // Add existing data
     existingData.forEach(row => {
-      const key = row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'];
+      const key = row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id;
       if (key) mergedDataMap.set(key, row);
     });
-    // Merge in new data (update or add new rows)
     newData.forEach(row => {
-      const key = row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'];
+      const key = row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id;
       if (key) {
         mergedDataMap.set(key, row);
       }
     });
     const mergedData = Array.from(mergedDataMap.values());
-
-    // Write merged data back to the master CSV file (OUTPUT_CSV)
     const ws = createWriteStream(OUTPUT_CSV);
     const csvStream = format({ headers: true });
     csvStream.pipe(ws);
     mergedData.forEach(row => csvStream.write(row));
     csvStream.end();
-
-    // Optionally remove the temporary uploaded file
     await fs.unlink(req.file.path);
-    
-    // Reload data (this will now include the merged products)
     await loadData();
     res.status(200).json({ message: 'Output CSV uploaded and merged successfully. Data refreshed.' });
   } catch (error) {
@@ -369,7 +347,7 @@ app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => 
   }
 });
 
-// Refresh endpoint: re-read data from output CSV and roster Excel.
+// Refresh endpoint
 app.post('/api/refresh', async (req, res) => {
   try {
     await loadData();
@@ -381,7 +359,7 @@ app.post('/api/refresh', async (req, res) => {
   }
 });
 
-// Assign endpoint: assign the oldest unassigned product to an agent.
+// Assign endpoint
 let assignmentInProgress = false;
 app.post('/api/assign', async (req, res) => {
   if (assignmentInProgress) {
@@ -438,7 +416,7 @@ app.post('/api/assign', async (req, res) => {
   }
 });
 
-// Complete endpoint: mark an assignment as completed.
+// Complete endpoint
 app.post('/api/complete', async (req, res) => {
   try {
     const { agentId, productId } = req.body;
@@ -471,7 +449,7 @@ app.post('/api/complete', async (req, res) => {
   }
 });
 
-// NEW Endpoint: Complete All Tasks for Agent
+// Complete All Tasks endpoint
 app.post('/api/complete-all-agent', async (req, res) => {
   try {
     const { agentId } = req.body;
@@ -520,7 +498,6 @@ app.post('/api/unassign-product', async (req, res) => {
       if (agent) {
         agent.currentAssignments = agent.currentAssignments.filter(task => task.productId !== productId);
       }
-      // Mark the assignment as unassigned.
       assignment.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
       assignment.unassignedBy = agent ? agent.name : 'Unknown';
       assignment.wasUnassigned = true;
@@ -602,7 +579,7 @@ app.post('/api/unassign-all', async (req, res) => {
   }
 });
 
-// Download completed assignments as CSV.
+// Download endpoints
 app.get('/api/download/completed-assignments', (req, res) => {
   const completed = assignments.filter(a => a.completed);
   res.setHeader('Content-disposition', 'attachment; filename=completed-tasks.csv');
@@ -613,7 +590,8 @@ app.get('/api/download/completed-assignments', (req, res) => {
     const agent = agents.find(ag => ag.id === a.agentId);
     csvStream.write({
       assignmentId: a.id,
-      agentName: agent ? agent.name : 'Unknown',
+      agentId: a.agentId,
+      completedBy: agent ? agent.name : 'Unknown',
       productId: a.productId,
       assignedOn: a.assignedOn,
       completedOn: a.completedOn
@@ -622,7 +600,6 @@ app.get('/api/download/completed-assignments', (req, res) => {
   csvStream.end();
 });
 
-// Download unassigned products as CSV.
 app.get('/api/download/unassigned-products', (req, res) => {
   const unassigned = products.filter(p => !p.assigned);
   res.setHeader('Content-disposition', 'attachment; filename=unassigned-products.csv');
@@ -641,32 +618,28 @@ app.get('/api/download/unassigned-products', (req, res) => {
   csvStream.end();
 });
 
-// Download previously assigned products as CSV.
 app.get('/api/download/previously-assigned', (req, res) => {
-  // Previously assigned products are those that were either completed or unassigned.
-  const previouslyAssigned = assignments.filter(a => a.completed || a.unassignedTime);
+  const prev = assignments.filter(a => a.completed || a.unassignedTime).map(a => {
+    const product = products.find(p => p.id === a.productId);
+    return {
+      productId: product ? product.id : a.productId,
+      count: product ? product.count : '',
+      tenantId: product ? product.tenantId : '',
+      priority: product ? product.priority : '',
+      createdOn: product ? product.createdOn : '',
+      unassignedTime: a.unassignedTime || '',
+      unassignedBy: a.unassignedBy || ''
+    };
+  });
   res.setHeader('Content-disposition', 'attachment; filename=previously-assigned.csv');
   res.setHeader('Content-Type', 'text/csv');
   const csvStream = format({ headers: true });
   csvStream.pipe(res);
-  previouslyAssigned.forEach(a => {
-    const agent = agents.find(ag => ag.id === a.agentId);
-    csvStream.write({
-      assignmentId: a.id,
-      agentName: agent ? agent.name : 'Unknown',
-      productId: a.productId,
-      assignedOn: a.assignedOn,
-      completedOn: a.completedOn || '',
-      unassignedTime: a.unassignedTime || '',
-      unassignedBy: a.unassignedBy || ''
-    });
-  });
+  prev.forEach(row => csvStream.write(row));
   csvStream.end();
 });
 
-// Download complete product queue as CSV.
 app.get('/api/download/queue', (req, res) => {
-  // For the product queue, we'll consider all products.
   res.setHeader('Content-disposition', 'attachment; filename=product-queue.csv');
   res.setHeader('Content-Type', 'text/csv');
   const csvStream = format({ headers: true });
@@ -684,9 +657,7 @@ app.get('/api/download/queue', (req, res) => {
   csvStream.end();
 });
 
-// ------------------------------
-// Start the Server
-// ------------------------------
+// Start the server
 app.listen(PORT, async () => {
   console.log(`Server running on port ${PORT}`);
   await loadData();
