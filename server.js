@@ -6,6 +6,7 @@
  * - Loads products from "output.csv" (using abstract_product_id as primary).
  * - Uses MongoDB for persistent data storage.
  * - Includes error handling to catch and display issues during startup.
+ * - Provides fallback sample data if no data is found.
  ***************************************************************/
 
 // Add error handlers at the top
@@ -205,6 +206,48 @@ async function readRosterExcel() {
   }
 }
 
+// Create sample agents if none exist
+function createSampleAgents() {
+  console.log("Creating sample agents as fallback...");
+  const sampleAgents = [];
+  
+  // Create 10 sample agents
+  for (let i = 1; i <= 10; i++) {
+    sampleAgents.push({
+      id: i,
+      name: `Sample Agent ${i}`,
+      role: "Item Review",
+      capacity: 10,
+      currentAssignments: []
+    });
+  }
+  
+  console.log(`Created ${sampleAgents.length} sample agents`);
+  return sampleAgents;
+}
+
+// Create sample products if none exist
+function createSampleProducts() {
+  console.log("Creating sample products as fallback...");
+  const sampleProducts = [];
+  
+  // Create 20 sample products
+  for (let i = 1; i <= 20; i++) {
+    sampleProducts.push({
+      id: `SAMPLE${i.toString().padStart(5, '0')}`,
+      name: `Sample Product ${i}`,
+      priority: i % 3 === 0 ? 'P1' : (i % 3 === 1 ? 'P2' : 'P3'),
+      tenantId: `Sample-Tenant-${Math.floor(i/5) + 1}`,
+      createdOn: new Date(Date.now() - (i * 86400000)).toISOString().replace('T', ' ').substring(0, 19),
+      count: Math.floor(Math.random() * 5) + 1,
+      assigned: false
+    });
+  }
+  
+  console.log(`Created ${sampleProducts.length} sample products`);
+  return sampleProducts;
+}
+
 // ------------------------------
 // Load Data
 // ------------------------------
@@ -242,11 +285,8 @@ async function loadData() {
           }
           await saveAgents();
         } else {
-          console.log("Creating sample agents...");
-          agents = [
-            { id: 1, name: "Agent Sample 1", role: "Item Review", capacity: 10, currentAssignments: [] },
-            { id: 2, name: "Agent Sample 2", role: "Item Review", capacity: 10, currentAssignments: [] }
-          ];
+          console.log("No agents found in Excel, creating sample agents...");
+          agents = createSampleAgents();
           // Save sample agents to MongoDB
           for (const agent of agents) {
             await Agent.create(agent);
@@ -267,30 +307,47 @@ async function loadData() {
       console.log("No products found in MongoDB, loading from CSV...");
       try {
         const csvRows = await readOutputCsv();
-        products = csvRows.map(row => ({
-          id: row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id,
-          name: row.product_name || "",
-          priority: row.rule_priority || row.priority,
-          tenantId: row.tenant_id,
-          createdOn: row.oldest_created_on || row.sys_created_on || row.created_on,
-          count: row.count,
-          assigned: false
-        }));
-        products = products.filter(p => p.id);
-        console.log(`Loaded ${products.length} products from output CSV`);
-        
-        // Save products to MongoDB in batches to avoid timeout
-        console.log("Saving products to MongoDB in batches...");
-        const batchSize = 100;
-        for (let i = 0; i < products.length; i += batchSize) {
-          const batch = products.slice(i, i + batchSize);
-          await Product.insertMany(batch);
-          console.log(`Saved batch ${Math.floor(i/batchSize) + 1} of products to MongoDB`);
+        if (csvRows.length > 0) {
+          products = csvRows.map(row => ({
+            id: row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id,
+            name: row.product_name || "",
+            priority: row.rule_priority || row.priority,
+            tenantId: row.tenant_id,
+            createdOn: row.oldest_created_on || row.sys_created_on || row.created_on,
+            count: row.count,
+            assigned: false
+          }));
+          products = products.filter(p => p.id);
+          console.log(`Loaded ${products.length} products from output CSV`);
+          
+          if (products.length > 0) {
+            // Save products to MongoDB in batches to avoid timeout
+            console.log("Saving products to MongoDB in batches...");
+            const batchSize = 100;
+            for (let i = 0; i < products.length; i += batchSize) {
+              const batch = products.slice(i, i + batchSize);
+              await Product.insertMany(batch);
+              console.log(`Saved batch ${Math.floor(i/batchSize) + 1} of products to MongoDB`);
+            }
+            console.log("All product batches saved to MongoDB");
+          } else {
+            console.log("No valid products found in CSV");
+            products = createSampleProducts();
+            await Product.insertMany(products);
+            console.log(`Created and saved ${products.length} sample products to MongoDB`);
+          }
+        } else {
+          console.log("No data found in CSV, creating sample products");
+          products = createSampleProducts();
+          await Product.insertMany(products);
+          console.log(`Created and saved ${products.length} sample products to MongoDB`);
         }
-        console.log("All product batches saved to MongoDB");
       } catch (error) {
         console.log('Error loading products from output CSV:', error);
-        products = [];
+        console.log("Creating sample products as fallback");
+        products = createSampleProducts();
+        await Product.insertMany(products);
+        console.log(`Created and saved ${products.length} sample products to MongoDB`);
       }
     } else {
       console.log(`Found ${productsFromDB.length} products in MongoDB`);
@@ -818,8 +875,6 @@ app.post('/api/complete-all-agent', async (req, res) => {
     
     for (const assignment of activeAssignments) {
       assignment.completed = true;
-      assignment.completedOn = complete
-assignment.completed = true;
       assignment.completedOn = completedTime;
       await assignment.save();
       console.log(`Marked assignment ${assignment.id} as completed`);
