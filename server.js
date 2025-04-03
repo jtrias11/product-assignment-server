@@ -1,27 +1,20 @@
 /***************************************************************
  * server.js - Final Script with Optimized CSV Upload and 6-Column Mapping
- * 
- * Expected CSV Columns:
- *   1) item.abstract_product_id
- *   2) abstract_product_id
- *   3) rule_priority
- *   4) tenant_id
- *   5) oldest_created_on
- *   6) count
+ *
+ * Expected CSV Columns (in header row):
+ *   item.abstract_product_id, abstract_product_id, rule_priority, tenant_id, oldest_created_on, count
  *
  * Features:
  * - Connects to MongoDB via MONGO_URI.
  * - Loads agents from "Walmart BH Roster.xlsx" (using column E) if none exist.
  * - Loads products from "output.csv" if none exist.
- * - CSV upload endpoint uses bulkWrite for efficient updates.
- * - Provides endpoints for refreshing data, task assignment,
- *   task completion, unassignment, and CSV downloads.
+ * - CSV upload endpoint uses bulkWrite for efficient updates (no fallback UUID generation).
+ * - Provides endpoints for refreshing data, task assignment, task completion, unassignment, and CSV downloads.
  ***************************************************************/
 
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { v4: uuidv4 } = require('uuid');
 const fs = require('fs').promises;
 const path = require('path');
 const csvParser = require('csv-parser');
@@ -86,7 +79,7 @@ async function fileExists(filePath) {
   }
 }
 
-// Reads the entire CSV from OUTPUT_CSV
+// Reads the entire CSV from OUTPUT_CSV (for initial import)
 async function readInitialCsv() {
   console.log(`Looking for output CSV at: ${OUTPUT_CSV}`);
   if (!(await fileExists(OUTPUT_CSV))) {
@@ -161,7 +154,7 @@ async function readRosterExcel() {
 async function loadData() {
   await ensureDataDir();
 
-  // Agents: Import from Excel if none exist.
+  // Load agents if none exist
   const agentCount = await Agent.countDocuments();
   if (agentCount === 0) {
     console.log('No agents found in MongoDB, importing from Excel roster...');
@@ -179,12 +172,13 @@ async function loadData() {
     }
   }
 
-  // Products: Import from CSV if none exist.
+  // Load products if none exist
   const productCount = await Product.countDocuments();
   if (productCount === 0) {
     console.log('No products found in MongoDB, importing from CSV...');
     const csvRows = await readInitialCsv();
     const csvProducts = csvRows.map(row => {
+      // Use either "abstract_product_id" or "item.abstract_product_id" for the product ID.
       const productId = row['abstract_product_id'] || row['item.abstract_product_id'];
       return {
         id: productId,
@@ -192,7 +186,7 @@ async function loadData() {
         priority: row['rule_priority'] || null,
         tenantId: row['tenant_id'] || null,
         createdOn: row['oldest_created_on'] || null,
-        count: row['count'] || 1,
+        count: Number(row['count']) || 1,
         assigned: false
       };
     }).filter(p => p.id);
@@ -304,7 +298,8 @@ app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => 
       createReadStream(req.file.path)
         .pipe(csvParser())
         .on('data', row => {
-          console.log('Row:', row); // Debug: check keys and values
+          console.log('Row Keys:', Object.keys(row)); // Debug: log keys
+          console.log('Row Data:', row);              // Debug: log full row
           rows.push(row);
         })
         .on('end', resolve)
@@ -321,12 +316,12 @@ app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => 
           update: {
             $set: {
               id: productId,
-              name: productId, // Derive name from productId
+              name: productId, // Derive name from the product ID
               priority: row['rule_priority'] || null,
               tenantId: row['tenant_id'] || null,
               createdOn: row['oldest_created_on'] || null,
-              count: row['count'] || 1,
-              assigned: false  // Force unassigned on upload
+              count: Number(row['count']) || 1,
+              assigned: false // Reset to unassigned on upload
             }
           },
           upsert: true
