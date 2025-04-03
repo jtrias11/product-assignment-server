@@ -1,19 +1,21 @@
 /***************************************************************
- * server.js - Final Script with MongoDB Integration
+ * server.js - Final Script (Tailored to 6 CSV columns)
+ * 
+ * CSV Columns:
+ *   1) item.abstract_product_id
+ *   2) abstract_product_id
+ *   3) rule_priority
+ *   4) tenant_id
+ *   5) oldest_created_on
+ *   6) count
  * 
  * Features:
- * - Connects to MongoDB using Mongoose.
- * - Loads agents from "Walmart BH Roster.xlsx" (using column E) if the Agent collection is empty.
- * - Loads products from "output.csv" using the following mappings:
- *     - Product ID: from item.abstract_product_id, abstract_product_id, or product_id.
- *     - Product Name: from product_name or fallback to abstract_product_id.
- *     - Priority: from rule_priority (or priority).
- *     - Tenant ID: from tenant_id.
- *     - Created On: from oldest_created_on (or sys_created_on/created_on).
- *     - Count: from count.
- * - Provides endpoints to refresh data, upload CSV (merging data), assign tasks,
- *   complete tasks (including complete all tasks per agent), unassign tasks,
- *   and download CSVs for completed, unassigned, and the full queue.
+ * - Connects to MongoDB using Mongoose (MONGO_URI).
+ * - Loads agents from "Walmart BH Roster.xlsx" (column E) if none exist.
+ * - Loads products from "output.csv" if none exist.
+ * - CSV upload is optimized with bulkWrite (no merging with existing file).
+ * - Provides endpoints for refreshing data, assigning tasks, completing tasks,
+ *   unassigning tasks, and downloading CSVs for various views.
  ***************************************************************/
 
 require('dotenv').config();
@@ -24,12 +26,12 @@ const fs = require('fs').promises;
 const path = require('path');
 const csvParser = require('csv-parser');
 const xlsx = require('xlsx');
-const { createReadStream, createWriteStream } = require('fs');
+const { createReadStream } = require('fs');
 const multer = require('multer');
 const { format } = require('@fast-csv/format');
 const mongoose = require('mongoose');
 
-// Import Mongoose models
+// Models
 const Agent = require('./models/Agent');
 const Product = require('./models/Product');
 const Assignment = require('./models/Assignment');
@@ -87,33 +89,45 @@ async function fileExists(filePath) {
   }
 }
 
-// Reads products from output.csv using expected column names
-function readOutputCsv() {
-  return new Promise((resolve) => {
-    let results = [];
-    console.log(`Looking for output CSV at: ${OUTPUT_CSV}`);
-    fs.access(OUTPUT_CSV)
-      .then(() => {
-        createReadStream(OUTPUT_CSV)
-          .pipe(csvParser())
-          .on('data', (row) => results.push(row))
-          .on('end', () => {
-            console.log(`Loaded ${results.length} rows from output CSV.`);
-            resolve(results);
-          })
-          .on('error', (error) => {
-            console.error('Error reading output CSV:', error);
-            resolve([]);
-          });
+// Reads the existing output.csv if it exists
+async function readExistingCsv(filePath) {
+  const rows = [];
+  if (await fileExists(filePath)) {
+    return new Promise((resolve, reject) => {
+      createReadStream(filePath)
+        .pipe(csvParser())
+        .on('data', row => rows.push(row))
+        .on('end', () => resolve(rows))
+        .on('error', reject);
+    });
+  }
+  return rows;
+}
+
+// Reads products from output.csv if none exist in MongoDB
+async function readInitialCsv() {
+  console.log(`Looking for output CSV at: ${OUTPUT_CSV}`);
+  if (!(await fileExists(OUTPUT_CSV))) {
+    console.error(`No output.csv found at: ${OUTPUT_CSV}`);
+    return [];
+  }
+  const rows = [];
+  return new Promise((resolve, reject) => {
+    createReadStream(OUTPUT_CSV)
+      .pipe(csvParser())
+      .on('data', row => rows.push(row))
+      .on('end', () => {
+        console.log(`Loaded ${rows.length} rows from output CSV.`);
+        resolve(rows);
       })
-      .catch(() => {
-        console.error(`Output CSV file not found at: ${OUTPUT_CSV}`);
+      .on('error', (error) => {
+        console.error('Error reading output CSV:', error);
         resolve([]);
       });
   });
 }
 
-// Reads agents from the Excel roster (using column E)
+// Reads agents from Excel Roster (column E)
 async function readRosterExcel() {
   try {
     if (!(await fileExists(ROSTER_EXCEL))) {
@@ -146,7 +160,7 @@ async function readRosterExcel() {
           agentsList.push({
             name,
             role: "Item Review",
-            capacity: 30, // Updated capacity to 30
+            capacity: 30,
           });
         }
       }
@@ -160,20 +174,21 @@ async function readRosterExcel() {
 }
 
 // ------------------------------
-// Load Data into MongoDB
+// Load Data on Startup
 // ------------------------------
 async function loadData() {
   await ensureDataDir();
 
-  // Load agents: If none exist, import from Excel
+  // Load agents if none exist
   const agentCount = await Agent.countDocuments();
   if (agentCount === 0) {
-    console.log('No agents found in MongoDB, importing from Excel roster...');
+    console.log('No agents found in MongoDB, importing from Excel...');
     const excelAgents = await readRosterExcel();
     if (excelAgents.length > 0) {
       await Agent.insertMany(excelAgents);
       console.log(`Imported ${excelAgents.length} agents from Excel roster`);
     } else {
+      // Insert sample agents if no Excel
       const sampleAgents = [
         { name: "Agent Sample 1", role: "Item Review", capacity: 30 },
         { name: "Agent Sample 2", role: "Item Review", capacity: 30 }
@@ -183,23 +198,26 @@ async function loadData() {
     }
   }
 
-  // Load products: If none exist, import from CSV using expected columns.
-  // Note: If the CSV doesn't include a 'product_name' column, the product name is derived from 'abstract_product_id'.
+  // Load products if none exist
   const productCount = await Product.countDocuments();
   if (productCount === 0) {
     console.log('No products found in MongoDB, importing from CSV...');
-    const csvRows = await readOutputCsv();
-    let csvProducts = csvRows.map(row => ({
-      id: row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id,
-      name: row.product_name || row.abstract_product_id || "Unnamed Product",
-      priority: row.rule_priority || row.priority,
-      tenantId: row.tenant_id,
-      createdOn: row.oldest_created_on || row.sys_created_on || row.created_on,
-      count: row.count,
-      assigned: false
-    }));
-    csvProducts = csvProducts.filter(p => p.id);
-    if (csvProducts.length > 0) {
+    const csvRows = await readInitialCsv();
+    if (csvRows.length > 0) {
+      const csvProducts = csvRows.map(row => {
+        // item.abstract_product_id, abstract_product_id, rule_priority, tenant_id, oldest_created_on, count
+        const productId = row['abstract_product_id'] || row['item.abstract_product_id'];
+        return {
+          id: productId,
+          name: productId || "Unnamed Product",
+          priority: row['rule_priority'] || null,
+          tenantId: row['tenant_id'] || null,
+          createdOn: row['oldest_created_on'] || null,
+          count: row['count'] || null,
+          assigned: false
+        };
+      }).filter(p => p.id);
+
       await Product.insertMany(csvProducts);
       console.log(`Imported ${csvProducts.length} products from CSV`);
     }
@@ -210,9 +228,11 @@ async function loadData() {
 // ------------------------------
 // API Routes
 // ------------------------------
-app.get('/', (req, res) => { res.send('Product Assignment Server is running'); });
+app.get('/', (req, res) => {
+  res.send('Product Assignment Server is running');
+});
 
-app.get('/api/agents', async (req, res) => { 
+app.get('/api/agents', async (req, res) => {
   try {
     const agents = await Agent.find();
     res.json(agents);
@@ -221,7 +241,7 @@ app.get('/api/agents', async (req, res) => {
   }
 });
 
-app.get('/api/products', async (req, res) => { 
+app.get('/api/products', async (req, res) => {
   try {
     const products = await Product.find();
     res.json(products);
@@ -230,7 +250,7 @@ app.get('/api/products', async (req, res) => {
   }
 });
 
-app.get('/api/assignments', async (req, res) => { 
+app.get('/api/assignments', async (req, res) => {
   try {
     const assignments = await Assignment.find();
     res.json(assignments);
@@ -239,7 +259,7 @@ app.get('/api/assignments', async (req, res) => {
   }
 });
 
-// Completed assignments endpoint
+// Completed assignments
 app.get('/api/completed-assignments', async (req, res) => {
   try {
     const completed = await Assignment.find({ completed: true });
@@ -249,7 +269,7 @@ app.get('/api/completed-assignments', async (req, res) => {
   }
 });
 
-// Unassigned products endpoint
+// Unassigned products
 app.get('/api/unassigned-products', async (req, res) => {
   try {
     const unassigned = await Product.find({ assigned: false });
@@ -259,7 +279,7 @@ app.get('/api/unassigned-products', async (req, res) => {
   }
 });
 
-// Previously assigned endpoint
+// Previously assigned
 app.get('/api/previously-assigned', async (req, res) => {
   try {
     const prev = await Assignment.find({ $or: [ { completed: true }, { unassignedTime: { $exists: true } } ] });
@@ -282,7 +302,7 @@ app.get('/api/previously-assigned', async (req, res) => {
   }
 });
 
-// Queue endpoint: return all products
+// Queue endpoint
 app.get('/api/queue', async (req, res) => {
   try {
     const products = await Product.find();
@@ -292,64 +312,62 @@ app.get('/api/queue', async (req, res) => {
   }
 });
 
-// File Upload Endpoint (Merge CSV)
+// ------------------------------
+// Optimized CSV Upload Endpoint (BulkWrite)
+// ------------------------------
 app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => {
   try {
-    console.log('File upload received:', req.file);
-    const newData = await new Promise((resolve, reject) => {
-      const results = [];
+    console.log('File upload received:', req.file.path);
+
+    // Parse the uploaded CSV
+    const rows = [];
+    await new Promise((resolve, reject) => {
       createReadStream(req.file.path)
         .pipe(csvParser())
-        .on('data', (row) => results.push(row))
-        .on('end', () => resolve(results))
+        .on('data', row => rows.push(row))
+        .on('end', resolve)
         .on('error', reject);
     });
-    let existingData = [];
-    if (await fileExists(OUTPUT_CSV)) {
-      existingData = await new Promise((resolve, reject) => {
-        const results = [];
-        createReadStream(OUTPUT_CSV)
-          .pipe(csvParser())
-          .on('data', (row) => results.push(row))
-          .on('end', () => resolve(results))
-          .on('error', reject);
+
+    // Convert CSV rows to bulk operations
+    const bulkOps = [];
+    for (const row of rows) {
+      // item.abstract_product_id, abstract_product_id, rule_priority, tenant_id, oldest_created_on, count
+      const productId = row['abstract_product_id'] || row['item.abstract_product_id'];
+      if (!productId) {
+        continue; // skip any row without a valid product ID
+      }
+      bulkOps.push({
+        updateOne: {
+          filter: { id: productId },
+          update: {
+            $set: {
+              id: productId,
+              name: productId || "Unnamed Product",
+              priority: row['rule_priority'] || null,
+              tenantId: row['tenant_id'] || null,
+              createdOn: row['oldest_created_on'] || null,
+              count: row['count'] || null,
+              // We do not change assigned if it already exists
+            }
+          },
+          upsert: true
+        }
       });
     }
-    const mergedDataMap = new Map();
-    existingData.forEach(row => {
-      const key = row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id;
-      if (key) mergedDataMap.set(key, row);
-    });
-    newData.forEach(row => {
-      const key = row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id;
-      if (key) {
-        mergedDataMap.set(key, row);
-      }
-    });
-    const mergedData = Array.from(mergedDataMap.values());
-    const ws = createWriteStream(OUTPUT_CSV);
-    const csvStream = format({ headers: true });
-    csvStream.pipe(ws);
-    mergedData.forEach(row => csvStream.write(row));
-    csvStream.end();
-    await fs.unlink(req.file.path);
-    // Update products in MongoDB based on merged CSV
-    let csvProducts = mergedData.map(row => ({
-      id: row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id,
-      name: row.product_name || row.abstract_product_id || "Unnamed Product",
-      priority: row.rule_priority || row.priority,
-      tenantId: row.tenant_id,
-      createdOn: row.oldest_created_on || row.sys_created_on || row.created_on,
-      count: row.count,
-      assigned: false
-    }));
-    csvProducts = csvProducts.filter(p => p.id);
-    for (const prod of csvProducts) {
-      await Product.findOneAndUpdate({ id: prod.id }, prod, { upsert: true, new: true });
+
+    // Perform the bulk write
+    if (bulkOps.length > 0) {
+      await Product.bulkWrite(bulkOps);
+      console.log(`Processed ${bulkOps.length} updates via bulkWrite`);
     }
-    res.status(200).json({ message: 'Output CSV uploaded and merged successfully. Data refreshed.' });
+
+    // Delete the uploaded file to keep the environment clean
+    await fs.unlink(req.file.path);
+
+    res.status(200).json({ message: 'CSV uploaded successfully. Products updated.' });
   } catch (error) {
-    console.error('Error uploading output CSV:', error);
+    console.error('Error uploading CSV:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -365,14 +383,14 @@ app.post('/api/refresh', async (req, res) => {
 });
 
 // ------------------------------
-// Task Assignment and Completion Endpoints
+// Task Assignment and Completion
 // ------------------------------
 let assignmentInProgress = false;
 
-// Assign endpoint: assign an available product to the specified agent
+// Assign a product
 app.post('/api/assign', async (req, res) => {
   if (assignmentInProgress) {
-    return res.status(409).json({ error: 'Another assignment is in progress, please try again later' });
+    return res.status(409).json({ error: 'Another assignment is in progress' });
   }
   assignmentInProgress = true;
   try {
@@ -386,25 +404,38 @@ app.post('/api/assign', async (req, res) => {
       assignmentInProgress = false;
       return res.status(404).json({ error: 'Agent not found' });
     }
-    const activeCount = await Assignment.countDocuments({ agentId: agent._id, completed: false, unassignedTime: { $exists: false } });
+    const activeCount = await Assignment.countDocuments({
+      agentId: agent._id,
+      completed: false,
+      unassignedTime: { $exists: false }
+    });
     if (activeCount >= agent.capacity) {
       assignmentInProgress = false;
-      return res.status(400).json({ error: 'Agent has reached maximum capacity' });
+      return res.status(400).json({ error: 'Agent has reached max capacity' });
     }
+
     const assignedProductIds = (await Assignment.find({})).map(a => a.productId);
-    const availableProduct = await Product.findOne({ assigned: false, id: { $nin: assignedProductIds } }).sort({ createdOn: 1 });
+    const availableProduct = await Product.findOne({
+      assigned: false,
+      id: { $nin: assignedProductIds }
+    }).sort({ createdOn: 1 });
+
     if (!availableProduct) {
       assignmentInProgress = false;
       return res.status(404).json({ error: 'No available products to assign' });
     }
+
+    // Mark product as assigned
     availableProduct.assigned = true;
     await availableProduct.save();
+
     const newAssignment = await Assignment.create({
       agentId: agent._id,
       productId: availableProduct.id,
       assignedOn: new Date().toISOString().replace('T', ' ').substring(0, 19),
       completed: false
     });
+
     assignmentInProgress = false;
     res.status(200).json({
       message: `Task ${availableProduct.id} assigned to ${agent.name}`,
@@ -416,7 +447,7 @@ app.post('/api/assign', async (req, res) => {
   }
 });
 
-// Complete endpoint: mark a specific task as completed
+// Complete a single task
 app.post('/api/complete', async (req, res) => {
   try {
     const { agentId, productId } = req.body;
@@ -427,25 +458,33 @@ app.post('/api/complete', async (req, res) => {
     if (!agent) {
       return res.status(404).json({ error: 'Agent not found' });
     }
-    const assignment = await Assignment.findOne({ agentId: agent._id, productId, completed: false, unassignedTime: { $exists: false } });
+    const assignment = await Assignment.findOne({
+      agentId: agent._id,
+      productId,
+      completed: false,
+      unassignedTime: { $exists: false }
+    });
     if (!assignment) {
       return res.status(404).json({ error: 'Active assignment not found' });
     }
+
     assignment.completed = true;
     assignment.completedOn = new Date().toISOString().replace('T', ' ').substring(0, 19);
     await assignment.save();
+
     const product = await Product.findOne({ id: productId });
     if (product) {
       product.assigned = false;
       await product.save();
     }
+
     res.status(200).json({ message: `Task ${productId} completed by ${agent.name}` });
   } catch (error) {
     res.status(500).json({ error: `Server error: ${error.message}` });
   }
 });
 
-// Complete All Tasks endpoint: mark all active tasks for an agent as completed
+// Complete all tasks for an agent
 app.post('/api/complete-all-agent', async (req, res) => {
   try {
     const { agentId } = req.body;
@@ -456,48 +495,65 @@ app.post('/api/complete-all-agent', async (req, res) => {
     if (!agent) {
       return res.status(404).json({ error: 'Agent not found' });
     }
-    const activeAssignments = await Assignment.find({ agentId: agent._id, completed: false, unassignedTime: { $exists: false } });
+
+    const activeAssignments = await Assignment.find({
+      agentId: agent._id,
+      completed: false,
+      unassignedTime: { $exists: false }
+    });
     if (activeAssignments.length === 0) {
-      return res.status(200).json({ message: 'No active tasks to complete for this agent' });
+      return res.status(200).json({ message: 'No active tasks for this agent' });
     }
+
     for (const assignment of activeAssignments) {
       assignment.completed = true;
       assignment.completedOn = new Date().toISOString().replace('T', ' ').substring(0, 19);
       await assignment.save();
+
       const product = await Product.findOne({ id: assignment.productId });
       if (product) {
         product.assigned = false;
         await product.save();
       }
     }
-    res.status(200).json({ message: `Completed all (${activeAssignments.length}) tasks for agent ${agent.name}` });
+    res.status(200).json({
+      message: `Completed all (${activeAssignments.length}) tasks for agent ${agent.name}`
+    });
   } catch (error) {
     res.status(500).json({ error: `Server error: ${error.message}` });
   }
 });
 
-// Unassign a single product: mark the assignment as unassigned
+// Unassign a single product
 app.post('/api/unassign-product', async (req, res) => {
   try {
-    const { productId, agentId } = req.body;
+    const { productId } = req.body;
     if (!productId) {
       return res.status(400).json({ error: 'Product ID is required' });
     }
-    const productAssignments = await Assignment.find({ productId, completed: false, unassignedTime: { $exists: false } });
+
+    const productAssignments = await Assignment.find({
+      productId,
+      completed: false,
+      unassignedTime: { $exists: false }
+    });
     if (productAssignments.length === 0) {
       return res.status(404).json({ error: 'No active assignment found for this product' });
     }
+
     for (const assignment of productAssignments) {
       const agent = await Agent.findById(assignment.agentId);
       assignment.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
       assignment.unassignedBy = agent ? agent.name : 'Unknown';
       await assignment.save();
     }
+
     const product = await Product.findOne({ id: productId });
     if (product) {
       product.assigned = false;
       await product.save();
     }
+
     res.status(200).json({ message: `Product ${productId} unassigned successfully` });
   } catch (error) {
     res.status(500).json({ error: `Server error: ${error.message}` });
@@ -515,21 +571,30 @@ app.post('/api/unassign-agent', async (req, res) => {
     if (!agent) {
       return res.status(404).json({ error: 'Agent not found' });
     }
-    const activeAssignments = await Assignment.find({ agentId: agent._id, completed: false, unassignedTime: { $exists: false } });
+
+    const activeAssignments = await Assignment.find({
+      agentId: agent._id,
+      completed: false,
+      unassignedTime: { $exists: false }
+    });
     if (activeAssignments.length === 0) {
       return res.status(200).json({ message: 'Agent has no tasks to unassign' });
     }
+
     for (const assignment of activeAssignments) {
       assignment.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
       assignment.unassignedBy = agent.name;
       await assignment.save();
+
       const product = await Product.findOne({ id: assignment.productId });
       if (product) {
         product.assigned = false;
         await product.save();
       }
     }
-    res.status(200).json({ message: `Unassigned ${activeAssignments.length} tasks from agent ${agent.name}` });
+    res.status(200).json({
+      message: `Unassigned ${activeAssignments.length} tasks from agent ${agent.name}`
+    });
   } catch (error) {
     res.status(500).json({ error: `Server error: ${error.message}` });
   }
@@ -538,19 +603,25 @@ app.post('/api/unassign-agent', async (req, res) => {
 // Unassign all tasks from all agents
 app.post('/api/unassign-all', async (req, res) => {
   try {
-    const activeAssignments = await Assignment.find({ completed: false, unassignedTime: { $exists: false } });
+    const activeAssignments = await Assignment.find({
+      completed: false,
+      unassignedTime: { $exists: false }
+    });
     for (const assignment of activeAssignments) {
       assignment.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
       const agent = await Agent.findById(assignment.agentId);
       assignment.unassignedBy = agent ? agent.name : 'Unknown';
       await assignment.save();
+
       const product = await Product.findOne({ id: assignment.productId });
       if (product) {
         product.assigned = false;
         await product.save();
       }
     }
-    res.status(200).json({ message: `Unassigned ${activeAssignments.length} tasks from all agents` });
+    res.status(200).json({
+      message: `Unassigned ${activeAssignments.length} tasks from all agents`
+    });
   } catch (error) {
     res.status(500).json({ error: `Server error: ${error.message}` });
   }
@@ -607,7 +678,9 @@ app.get('/api/download/unassigned-products', async (req, res) => {
 
 app.get('/api/download/previously-assigned', async (req, res) => {
   try {
-    const prev = await Assignment.find({ $or: [ { completed: true }, { unassignedTime: { $exists: true } } ] });
+    const prev = await Assignment.find({
+      $or: [{ completed: true }, { unassignedTime: { $exists: true } }]
+    });
     const results = [];
     for (const a of prev) {
       const product = await Product.findOne({ id: a.productId });
@@ -625,7 +698,9 @@ app.get('/api/download/previously-assigned', async (req, res) => {
     res.setHeader('Content-Type', 'text/csv');
     const csvStream = format({ headers: true });
     csvStream.pipe(res);
-    results.forEach(row => csvStream.write(row));
+    for (const row of results) {
+      csvStream.write(row);
+    }
     csvStream.end();
   } catch (error) {
     res.status(500).json({ error: error.message });
