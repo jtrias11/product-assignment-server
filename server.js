@@ -4,10 +4,16 @@
  * Features:
  * - Connects to MongoDB using Mongoose.
  * - Loads agents from "Walmart BH Roster.xlsx" (column E) if the Agent collection is empty.
- * - Loads products from "output.csv" using "abstract_product_id" as the primary identifier if the Product collection is empty.
+ * - Loads products from "output.csv" using the following mappings:
+ *     abstract_product_id -> Abstract ID
+ *     product_name -> Name
+ *     rule_priority (or priority) -> Rule Priority
+ *     tenant_id -> Tenant ID
+ *     oldest_created_on (or sys_created_on/created_on) -> Created On
+ *     count -> Count
  * - Provides endpoints to refresh data, upload CSV (merging data), assign tasks,
  *   complete tasks (including complete all tasks per agent),
- *   unassign tasks (marks them unassigned rather than deleting),
+ *   unassign tasks (marks them as unassigned),
  *   and download CSVs for completed, unassigned, and full queue.
  ***************************************************************/
 
@@ -82,7 +88,7 @@ async function fileExists(filePath) {
   }
 }
 
-// Reads products from output.csv
+// Reads products from output.csv using expected column names
 function readOutputCsv() {
   return new Promise((resolve) => {
     let results = [];
@@ -160,7 +166,7 @@ async function readRosterExcel() {
 async function loadData() {
   await ensureDataDir();
 
-  // Load agents: If none exist in MongoDB, import from Excel
+  // Load agents: If none exist, import from Excel
   const agentCount = await Agent.countDocuments();
   if (agentCount === 0) {
     console.log('No agents found in MongoDB, importing from Excel roster...');
@@ -178,7 +184,7 @@ async function loadData() {
     }
   }
 
-  // Load products: If none exist, import from CSV
+  // Load products: If none exist, import from CSV using expected columns
   const productCount = await Product.countDocuments();
   if (productCount === 0) {
     console.log('No products found in MongoDB, importing from CSV...');
@@ -198,8 +204,6 @@ async function loadData() {
       console.log(`Imported ${csvProducts.length} products from CSV`);
     }
   }
-
-  // Assignments will be managed in MongoDB; no initial load required.
   console.log('Data load complete');
 }
 
