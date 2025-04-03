@@ -1,98 +1,61 @@
 /***************************************************************
- * Optimized Server Performance Script
- * Enhanced MongoDB Integration with Performance Improvements
+ * server.js - Enhanced MongoDB Integration
+ * 
+ * Features:
+ * - Robust data loading from multiple sources
+ * - Comprehensive error handling
+ * - Performance optimizations
  ***************************************************************/
-
-// Error Handling
-process.on('uncaughtException', (err) => {
-  console.error('UNCAUGHT EXCEPTION:', err);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('UNHANDLED PROMISE REJECTION:', reason);
-});
 
 // Core Imports
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const { v4: uuidv4 } = require('uuid');
-const fs = require('fs').promises;
+const mongoose = require('mongoose');
 const path = require('path');
+const fs = require('fs').promises;
 const csvParser = require('csv-parser');
 const xlsx = require('xlsx');
-const { createReadStream, createWriteStream } = require('fs');
-const multer = require('multer');
-const { format } = require('@fast-csv/format');
-const mongoose = require('mongoose');
+const { createReadStream } = require('fs');
 
 // Model Imports
 const Agent = require('./models/Agent');
 const Product = require('./models/Product');
 const Assignment = require('./models/Assignment');
 
-// App Configuration
+// Configuration
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use((req, res, next) => {
-  req.startTime = Date.now();
-  next();
-});
-
-// Performance Logging Middleware
-const performanceLogger = (req, res, next) => {
-  res.on('finish', () => {
-    const duration = Date.now() - req.startTime;
-    console.log(`${req.method} ${req.path} - ${res.statusCode} (${duration}ms)`);
-  });
-  next();
-};
-app.use(performanceLogger);
+app.use(express.json());
 
 // File Paths
 const DATA_DIR = path.join(__dirname, 'data');
 const OUTPUT_CSV = path.join(DATA_DIR, 'output.csv');
 const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
 
-// Multer Configuration
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => { cb(null, DATA_DIR); },
-  filename: (req, file, cb) => { 
-    cb(null, `${Date.now()}-${file.originalname.replace(/\s+/g, '_')}`); 
-  }
-});
-const upload = multer({ 
-  storage,
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB file size limit
-});
-
-// Cached Global Variables
-let cachedAgents = [];
-let cachedProducts = [];
-
 // Enhanced MongoDB Connection
 const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGO_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
       serverSelectionTimeoutMS: 30000,
       socketTimeoutMS: 45000,
-      connectTimeoutMS: 45000,
-      maxPoolSize: 20, // Connection pool optimization
-      minPoolSize: 5
+      connectTimeoutMS: 45000
     });
+    
+    console.log('MongoDB Connected Successfully');
     
     // Create indexes for performance
     await Promise.all([
-      Product.createIndexes(),
       Agent.createIndexes(),
+      Product.createIndexes(),
       Assignment.createIndexes()
     ]);
     
-    console.log('MongoDB Connected with Performance Optimizations');
     return true;
   } catch (error) {
     console.error('MongoDB Connection Error:', error);
@@ -100,267 +63,182 @@ const connectDB = async () => {
   }
 };
 
-// Optimized Task Assignment Endpoint
-let assignmentLock = false;
-app.post('/api/assign', async (req, res) => {
-  const startTime = Date.now();
-  
-  // Prevent concurrent assignments
-  if (assignmentLock) {
-    return res.status(409).json({ 
-      error: 'Assignment in progress. Please try again.',
-      processingTime: Date.now() - startTime 
-    });
-  }
-  
-  assignmentLock = true;
-  
+// Utility Functions
+async function ensureDataDir() {
   try {
-    const { agentId } = req.body;
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    console.log('Data directory ensured');
+    return true;
+  } catch (error) {
+    console.error('Error creating data directory:', error);
+    return false;
+  }
+}
+
+// Read Agents from Excel
+async function readRosterExcel() {
+  try {
+    const workbook = xlsx.readFile(ROSTER_EXCEL);
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+    const data = xlsx.utils.sheet_to_json(worksheet);
     
-    // Validate input
-    if (!agentId) {
-      assignmentLock = false;
-      return res.status(400).json({ 
-        error: 'Agent ID is required',
-        processingTime: Date.now() - startTime 
-      });
-    }
+    const agents = data.map((row, index) => ({
+      id: index + 1,
+      name: row.Name || `Agent ${index + 1}`,
+      role: "Item Review",
+      capacity: 10,
+      currentAssignments: []
+    }));
     
-    // Parallel optimized queries
-    const [agent, assignedProductIds] = await Promise.all([
-      Agent.findOne({ id: agentId }),
-      Assignment.find({ 
-        completed: false, 
-        unassignedTime: { $exists: false } 
-      }).distinct('productId')
-    ]);
+    console.log(`Extracted ${agents.length} agents from Excel`);
+    return agents;
+  } catch (error) {
+    console.error('Error reading Excel roster:', error);
+    return [];
+  }
+}
+
+// Read Products from CSV
+async function readOutputCsv() {
+  return new Promise((resolve) => {
+    const results = [];
     
-    // Agent validation
-    if (!agent) {
-      assignmentLock = false;
-      return res.status(404).json({ 
-        error: 'Agent not found',
-        processingTime: Date.now() - startTime 
-      });
-    }
-    
-    // Capacity check
-    if (agent.currentAssignments.length >= agent.capacity) {
-      assignmentLock = false;
-      return res.status(400).json({ 
-        error: 'Agent has reached maximum capacity',
-        processingTime: Date.now() - startTime 
-      });
-    }
-    
-    // Find available products with efficient query
-    const availableProduct = await Product.findOne({
-      assigned: false,
-      id: { $nin: assignedProductIds }
-    }).sort({ createdOn: 1 }); // Oldest first
-    
-    if (!availableProduct) {
-      assignmentLock = false;
-      return res.status(404).json({ 
-        error: 'No available products',
-        processingTime: Date.now() - startTime 
-      });
-    }
-    
-    // Create assignment with transaction for data integrity
-    const session = await mongoose.startSession();
-    try {
-      await session.withTransaction(async () => {
-        // Update product
-        await Product.findByIdAndUpdate(
-          availableProduct._id, 
-          { assigned: true }, 
-          { session }
-        );
+    createReadStream(OUTPUT_CSV)
+      .pipe(csvParser())
+      .on('data', (row) => {
+        const productId = row.abstract_product_id || 
+                          row.item_abstract_product_id || 
+                          row['item.abstract_product_id'] || 
+                          row.product_id;
         
-        // Create new assignment
-        const newAssignment = new Assignment({
-          id: uuidv4(),
-          agentId: agent.id,
-          productId: availableProduct.id,
-          assignedOn: new Date().toISOString()
-        });
-        await newAssignment.save({ session });
-      });
-      
-      assignmentLock = false;
-      res.status(200).json({ 
-        message: `Product ${availableProduct.id} assigned to agent`,
-        processingTime: Date.now() - startTime 
-      });
-    } finally {
-      session.endSession();
-    }
-  } catch (error) {
-    assignmentLock = false;
-    console.error('Assignment Error:', error);
-    res.status(500).json({ 
-      error: 'Server error during assignment',
-      processingTime: Date.now() - startTime 
-    });
-  }
-});
-
-// Optimized CSV Upload Endpoint
-app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => {
-  const startTime = Date.now();
-  
-  try {
-    // Read CSV with streaming for large files
-    const newData = await new Promise((resolve, reject) => {
-      const results = [];
-      createReadStream(req.file.path)
-        .pipe(csvParser())
-        .on('data', (row) => results.push(row))
-        .on('end', () => resolve(results))
-        .on('error', reject);
-    });
-    
-    // Efficient bulk upsert with minimal database operations
-    const bulkOps = newData.map(row => {
-      const productId = row.abstract_product_id || 
-                        row.item_abstract_product_id || 
-                        row['item.abstract_product_id'] || 
-                        row.product_id;
-      
-      return {
-        updateOne: {
-          filter: { id: productId },
-          update: {
-            $set: {
-              id: productId,
-              name: row.product_name || '',
-              priority: row.rule_priority || row.priority || '',
-              tenantId: row.tenant_id || '',
-              createdOn: row.oldest_created_on || 
-                         row.sys_created_on || 
-                         row.created_on || 
-                         new Date().toISOString(),
-              count: row.count || 1,
-              assigned: false
-            }
-          },
-          upsert: true
+        if (productId) {
+          results.push({
+            id: productId,
+            name: row.product_name || '',
+            priority: row.rule_priority || row.priority || 'P3',
+            tenantId: row.tenant_id || '',
+            createdOn: row.oldest_created_on || 
+                       row.sys_created_on || 
+                       row.created_on || 
+                       new Date().toISOString(),
+            count: row.count || 1,
+            assigned: false
+          });
         }
-      };
-    }).filter(op => op.updateOne.filter.id); // Ensure valid ID
-    
-    // Perform bulk write with error handling
-    if (bulkOps.length > 0) {
-      const result = await Product.bulkWrite(bulkOps, { 
-        ordered: false,
-        bypassDocumentValidation: true 
+      })
+      .on('end', () => {
+        console.log(`Loaded ${results.length} products from CSV`);
+        resolve(results);
+      })
+      .on('error', (error) => {
+        console.error('Error reading output CSV:', error);
+        resolve([]);
       });
-      
-      // Clean up temporary file
-      await fs.unlink(req.file.path);
-      
-      res.status(200).json({ 
-        message: 'CSV uploaded successfully',
-        processed: bulkOps.length,
-        upserted: result.upsertedCount,
-        modified: result.modifiedCount,
-        processingTime: Date.now() - startTime
-      });
-    } else {
-      await fs.unlink(req.file.path);
-      res.status(400).json({ 
-        error: 'No valid products found in CSV',
-        processingTime: Date.now() - startTime 
-      });
-    }
-  } catch (error) {
-    console.error('CSV Upload Error:', error);
-    res.status(500).json({ 
-      error: 'Server error during CSV upload',
-      processingTime: Date.now() - startTime 
+  });
+}
+
+// Create Sample Data if No Data Exists
+function createSampleAgents() {
+  const sampleAgents = [];
+  for (let i = 1; i <= 10; i++) {
+    sampleAgents.push({
+      id: i,
+      name: `Sample Agent ${i}`,
+      role: "Item Review",
+      capacity: 10,
+      currentAssignments: []
     });
   }
-});
+  return sampleAgents;
+}
 
-// Optimized Download Endpoints
-app.get('/api/download/products', async (req, res) => {
-  try {
-    const products = await Product.find({}).lean();
-    
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename=products.csv');
-    
-    const csvStream = format({ headers: true });
-    csvStream.pipe(res);
-    
-    products.forEach(product => {
-      csvStream.write({
-        id: product.id,
-        name: product.name,
-        priority: product.priority,
-        tenantId: product.tenantId,
-        createdOn: product.createdOn,
-        count: product.count,
-        assigned: product.assigned
-      });
+function createSampleProducts() {
+  const sampleProducts = [];
+  for (let i = 1; i <= 20; i++) {
+    sampleProducts.push({
+      id: `SAMPLE${i.toString().padStart(5, '0')}`,
+      name: `Sample Product ${i}`,
+      priority: i % 3 === 0 ? 'P1' : (i % 3 === 1 ? 'P2' : 'P3'),
+      tenantId: `Sample-Tenant-${Math.floor(i/5) + 1}`,
+      createdOn: new Date(Date.now() - (i * 86400000)).toISOString(),
+      count: Math.floor(Math.random() * 5) + 1,
+      assigned: false
     });
-    
-    csvStream.end();
-  } catch (error) {
-    console.error('Product Download Error:', error);
-    res.status(500).json({ error: 'Failed to download products' });
   }
-});
+  return sampleProducts;
+}
 
-// Cached Agents Endpoint
+// Comprehensive Data Loading
+async function loadData() {
+  await ensureDataDir();
+
+  // Load Agents
+  let agentsFromDB = await Agent.find();
+  if (agentsFromDB.length === 0) {
+    console.log('No agents in database, attempting to load from sources');
+    
+    const excelAgents = await readRosterExcel();
+    const agentsToSave = excelAgents.length > 0 ? excelAgents : createSampleAgents();
+    
+    await Agent.insertMany(agentsToSave);
+    agentsFromDB = agentsToSave;
+    console.log(`Saved ${agentsFromDB.length} agents to database`);
+  }
+
+  // Load Products
+  let productsFromDB = await Product.find();
+  if (productsFromDB.length === 0) {
+    console.log('No products in database, attempting to load from sources');
+    
+    const csvProducts = await readOutputCsv();
+    const productsToSave = csvProducts.length > 0 ? csvProducts : createSampleProducts();
+    
+    await Product.insertMany(productsToSave);
+    productsFromDB = productsToSave;
+    console.log(`Saved ${productsFromDB.length} products to database`);
+  }
+}
+
+// API Routes
 app.get('/api/agents', async (req, res) => {
   try {
-    // Check if cached data exists and is recent
-    if (cachedAgents.length > 0 && 
-        Date.now() - (cachedAgents.lastUpdated || 0) < 5 * 60 * 1000) {
-      return res.json(cachedAgents);
-    }
-    
-    // Fetch fresh data
-    const agents = await Agent.find({}).lean();
-    
-    // Cache the result
-    cachedAgents = agents;
-    cachedAgents.lastUpdated = Date.now();
-    
+    const agents = await Agent.find();
     res.json(agents);
   } catch (error) {
-    console.error('Agents Fetch Error:', error);
+    console.error('Error fetching agents:', error);
     res.status(500).json({ error: 'Failed to fetch agents' });
   }
 });
 
-// Server Startup
-const startServer = async () => {
+app.get('/api/products', async (req, res) => {
   try {
+    const products = await Product.find();
+    res.json(products);
+  } catch (error) {
+    console.error('Error fetching products:', error);
+    res.status(500).json({ error: 'Failed to fetch products' });
+  }
+});
+
+// Server Startup
+async function startServer() {
+  try {
+    // Connect to MongoDB
     await connectDB();
     
-    const server = app.listen(PORT, () => {
+    // Load initial data
+    await loadData();
+    
+    // Start Express server
+    app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
     });
-    
-    // Graceful shutdown
-    process.on('SIGTERM', () => {
-      console.log('SIGTERM signal received: closing HTTP server');
-      server.close(() => {
-        console.log('HTTP server closed');
-        mongoose.connection.close(false, () => {
-          console.log('MongoDB connection closed');
-          process.exit(0);
-        });
-      });
-    });
   } catch (error) {
-    console.error('Server Startup Error:', error);
+    console.error('Server startup failed:', error);
     process.exit(1);
   }
-};
+}
 
+// Initialize Server
 startServer();
