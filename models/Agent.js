@@ -1,11 +1,9 @@
 const mongoose = require('mongoose');
 
-const AgentSchema = new mongoose.Schema({
-  id: Number,
-  name: String,
-  role: String,
-  capacity: { type: Number, default: 10 },
-  currentAssignments: { type: Array, default: [] }
+const agentSchema = new mongoose.Schema({
+  name: { type: String, required: true },
+  role: { type: String, default: 'Item Review' },
+  capacity: { type: Number, default: 30 }
 }, { timestamps: true });
 
-module.exports = mongoose.model('Agent', AgentSchema);
+module.exports = mongoose.model('Agent', agentSchema);
