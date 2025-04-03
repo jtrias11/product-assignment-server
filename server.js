@@ -75,7 +75,7 @@ async function readRosterExcel() {
       id: index + 1,
       name: row.Name || `Agent ${index + 1}`,
       role: "Item Review",
-      capacity: 10,
+      capacity: 30,  // Updated capacity to 30
       currentAssignments: []
     }));
     
@@ -142,7 +142,7 @@ function createSampleAgents() {
       id: i,
       name: `Sample Agent ${i}`,
       role: "Item Review",
-      capacity: 10,
+      capacity: 30,  // Updated capacity to 30
       currentAssignments: []
     });
   }
