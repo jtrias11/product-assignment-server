@@ -43,16 +43,128 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.use(express.json());
 
-// Logging Middleware
-app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-  next();
-});
-
 // File Paths
 const DATA_DIR = path.join(__dirname, 'data');
 const OUTPUT_CSV = path.join(DATA_DIR, 'output.csv');
 const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
+
+// Utility Functions
+async function ensureDataDir() {
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    console.log('Data directory ensured');
+    return true;
+  } catch (error) {
+    console.error('Error creating data directory:', error);
+    return false;
+  }
+}
+
+// Read Agents from Excel
+async function readRosterExcel() {
+  try {
+    // Check if file exists
+    await fs.access(ROSTER_EXCEL);
+    
+    const workbook = xlsx.readFile(ROSTER_EXCEL);
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+    const data = xlsx.utils.sheet_to_json(worksheet);
+    
+    const agents = data.map((row, index) => ({
+      id: index + 1,
+      name: row.Name || `Agent ${index + 1}`,
+      role: "Item Review",
+      capacity: 10,
+      currentAssignments: []
+    }));
+    
+    console.log(`Extracted ${agents.length} agents from Excel`);
+    return agents;
+  } catch (error) {
+    console.error('Error reading Excel roster:', error);
+    return [];
+  }
+}
+
+// Read Products from CSV
+async function readOutputCsv() {
+  return new Promise((resolve) => {
+    // Check if file exists
+    fs.access(OUTPUT_CSV)
+      .then(() => {
+        const results = [];
+        
+        createReadStream(OUTPUT_CSV)
+          .pipe(csvParser())
+          .on('data', (row) => {
+            const productId = row.abstract_product_id || 
+                              row.item_abstract_product_id || 
+                              row['item.abstract_product_id'] || 
+                              row.product_id;
+            
+            if (productId) {
+              results.push({
+                id: productId,
+                name: row.product_name || '',
+                priority: row.rule_priority || row.priority || 'P3',
+                tenantId: row.tenant_id || '',
+                createdOn: row.oldest_created_on || 
+                           row.sys_created_on || 
+                           row.created_on || 
+                           new Date().toISOString(),
+                count: row.count || 1,
+                assigned: false
+              });
+            }
+          })
+          .on('end', () => {
+            console.log(`Loaded ${results.length} products from CSV`);
+            resolve(results);
+          })
+          .on('error', (error) => {
+            console.error('Error reading output CSV:', error);
+            resolve([]);
+          });
+      })
+      .catch(() => {
+        console.log('No output CSV file found');
+        resolve([]);
+      });
+  });
+}
+
+// Create Sample Agents
+function createSampleAgents() {
+  const sampleAgents = [];
+  for (let i = 1; i <= 10; i++) {
+    sampleAgents.push({
+      id: i,
+      name: `Sample Agent ${i}`,
+      role: "Item Review",
+      capacity: 10,
+      currentAssignments: []
+    });
+  }
+  return sampleAgents;
+}
+
+// Create Sample Products
+function createSampleProducts() {
+  const sampleProducts = [];
+  for (let i = 1; i <= 20; i++) {
+    sampleProducts.push({
+      id: `SAMPLE${i.toString().padStart(5, '0')}`,
+      name: `Sample Product ${i}`,
+      priority: i % 3 === 0 ? 'P1' : (i % 3 === 1 ? 'P2' : 'P3'),
+      tenantId: `Sample-Tenant-${Math.floor(i/5) + 1}`,
+      createdOn: new Date(Date.now() - (i * 86400000)).toISOString(),
+      count: Math.floor(Math.random() * 5) + 1,
+      assigned: false
+    });
+  }
+  return sampleProducts;
+}
 
 // Enhanced MongoDB Connection
 const connectDB = async () => {
@@ -78,8 +190,6 @@ const connectDB = async () => {
     return false;
   }
 };
-
-// Existing utility functions for data loading remain the same as in previous implementation
 
 // Comprehensive Data Loading Function
 async function loadData() {
