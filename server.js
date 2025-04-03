@@ -1,125 +1,99 @@
 /***************************************************************
- * server.js - Enhanced MongoDB Integration
+ * server.js - Final Script with MongoDB Integration
  * 
  * Features:
- * - Robust data loading from multiple sources
- * - Comprehensive CORS configuration
- * - Performance optimizations
+ * - Connects to MongoDB using Mongoose.
+ * - Loads agents from "Walmart BH Roster.xlsx" (column E) if the Agent collection is empty.
+ * - Loads products from "output.csv" using "abstract_product_id" as the primary identifier if the Product collection is empty.
+ * - Provides endpoints to refresh data, upload CSV (merging data), assign tasks,
+ *   complete tasks (including complete all tasks per agent),
+ *   unassign tasks (marks them unassigned rather than deleting),
+ *   and download CSVs for completed, unassigned, and full queue.
  ***************************************************************/
 
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const mongoose = require('mongoose');
-const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 const fs = require('fs').promises;
+const path = require('path');
 const csvParser = require('csv-parser');
 const xlsx = require('xlsx');
-const { createReadStream } = require('fs');
+const { createReadStream, createWriteStream } = require('fs');
+const multer = require('multer');
+const { format } = require('@fast-csv/format');
+const mongoose = require('mongoose');
 
-// Model Imports
+// Import Mongoose models
 const Agent = require('./models/Agent');
 const Product = require('./models/Product');
 const Assignment = require('./models/Assignment');
 
-// Configuration
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Enhanced CORS Configuration
-const corsOptions = {
-  origin: [
-    'http://localhost:3000',  // Local development
-    'https://product-assignment-frontend.onrender.com',  // Frontend deployment
-    'https://product-assignment-server.onrender.com',  // Backend deployment
-  ],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true,
-  optionsSuccessStatus: 200
-};
-
-// Middleware
-app.use(cors(corsOptions));
+app.use(cors());
 app.use(express.json());
 
-// File Paths
+// ------------------------------
+// MongoDB Connection
+// ------------------------------
+mongoose.connect(process.env.MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+.then(() => console.log('MongoDB Connected'))
+.catch((error) => console.error('MongoDB Connection Error:', error));
+
+// ------------------------------
+// File Paths and Directories
+// ------------------------------
 const DATA_DIR = path.join(__dirname, 'data');
 const OUTPUT_CSV = path.join(DATA_DIR, 'output.csv');
 const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
 
-// Utility Functions
+// ------------------------------
+// Multer Configuration
+// ------------------------------
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => { cb(null, DATA_DIR); },
+  filename: (req, file, cb) => { cb(null, Date.now() + '-' + file.originalname); }
+});
+const upload = multer({ storage });
+
+// ------------------------------
+// Helper Functions
+// ------------------------------
 async function ensureDataDir() {
   try {
     await fs.mkdir(DATA_DIR, { recursive: true });
-    console.log('Data directory ensured');
-    return true;
+    console.log('Data directory is ready');
   } catch (error) {
     console.error('Error creating data directory:', error);
+  }
+}
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
     return false;
   }
 }
 
-// Read Agents from Excel
-async function readRosterExcel() {
-  try {
-    // Check if file exists
-    await fs.access(ROSTER_EXCEL);
-    
-    const workbook = xlsx.readFile(ROSTER_EXCEL);
-    const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
-    const data = xlsx.utils.sheet_to_json(worksheet);
-    
-    const agents = data.map((row, index) => ({
-      id: index + 1,
-      name: row.Name || `Agent ${index + 1}`,
-      role: "Item Review",
-      capacity: 30,  // Updated capacity to 30
-      currentAssignments: []
-    }));
-    
-    console.log(`Extracted ${agents.length} agents from Excel`);
-    return agents;
-  } catch (error) {
-    console.error('Error reading Excel roster:', error);
-    return [];
-  }
-}
-
-// Read Products from CSV
-async function readOutputCsv() {
+// Reads products from output.csv
+function readOutputCsv() {
   return new Promise((resolve) => {
-    // Check if file exists
+    let results = [];
+    console.log(`Looking for output CSV at: ${OUTPUT_CSV}`);
     fs.access(OUTPUT_CSV)
       .then(() => {
-        const results = [];
-        
         createReadStream(OUTPUT_CSV)
           .pipe(csvParser())
-          .on('data', (row) => {
-            const productId = row.abstract_product_id || 
-                              row.item_abstract_product_id || 
-                              row['item.abstract_product_id'] || 
-                              row.product_id;
-            
-            if (productId) {
-              results.push({
-                id: productId,
-                name: row.product_name || '',
-                priority: row.rule_priority || row.priority || 'P3',
-                tenantId: row.tenant_id || '',
-                createdOn: row.oldest_created_on || 
-                           row.sys_created_on || 
-                           row.created_on || 
-                           new Date().toISOString(),
-                count: row.count || 1,
-                assigned: false
-              });
-            }
-          })
+          .on('data', (row) => results.push(row))
           .on('end', () => {
-            console.log(`Loaded ${results.length} products from CSV`);
+            console.log(`Loaded ${results.length} rows from output CSV.`);
             resolve(results);
           })
           .on('error', (error) => {
@@ -128,182 +102,560 @@ async function readOutputCsv() {
           });
       })
       .catch(() => {
-        console.log('No output CSV file found');
+        console.error(`Output CSV file not found at: ${OUTPUT_CSV}`);
         resolve([]);
       });
   });
 }
 
-// Create Sample Agents
-function createSampleAgents() {
-  const sampleAgents = [];
-  for (let i = 1; i <= 10; i++) {
-    sampleAgents.push({
-      id: i,
-      name: `Sample Agent ${i}`,
-      role: "Item Review",
-      capacity: 30,  // Updated capacity to 30
-      currentAssignments: []
-    });
-  }
-  return sampleAgents;
-}
-
-// Create Sample Products
-function createSampleProducts() {
-  const sampleProducts = [];
-  for (let i = 1; i <= 20; i++) {
-    sampleProducts.push({
-      id: `SAMPLE${i.toString().padStart(5, '0')}`,
-      name: `Sample Product ${i}`,
-      priority: i % 3 === 0 ? 'P1' : (i % 3 === 1 ? 'P2' : 'P3'),
-      tenantId: `Sample-Tenant-${Math.floor(i/5) + 1}`,
-      createdOn: new Date(Date.now() - (i * 86400000)).toISOString(),
-      count: Math.floor(Math.random() * 5) + 1,
-      assigned: false
-    });
-  }
-  return sampleProducts;
-}
-
-// Enhanced MongoDB Connection
-const connectDB = async () => {
+// Reads agents from the Excel roster (using column E)
+async function readRosterExcel() {
   try {
-    await mongoose.connect(process.env.MONGO_URI, {
-      serverSelectionTimeoutMS: 30000,
-      socketTimeoutMS: 45000,
-      connectTimeoutMS: 45000
-    });
-    
-    console.log('MongoDB Connected Successfully');
-    
-    // Create indexes for performance
-    await Promise.all([
-      Agent.createIndexes(),
-      Product.createIndexes(),
-      Assignment.createIndexes()
-    ]);
-    
-    return true;
+    if (!(await fileExists(ROSTER_EXCEL))) {
+      console.log('Roster Excel file not found');
+      return [];
+    }
+    const workbook = xlsx.readFile(ROSTER_EXCEL);
+    let sheetName = "Agents List";
+    if (!workbook.SheetNames.includes(sheetName)) {
+      const possibleSheetNames = ["Agents", "AgentsList", "Agents_List", "Agent List", "Agent_List"];
+      for (const name of possibleSheetNames) {
+        if (workbook.SheetNames.includes(name)) {
+          sheetName = name;
+          break;
+        }
+      }
+      if (!workbook.SheetNames.includes(sheetName)) {
+        sheetName = workbook.SheetNames[0];
+      }
+    }
+    const worksheet = workbook.Sheets[sheetName];
+    const range = xlsx.utils.decode_range(worksheet['!ref']);
+    const agentsList = [];
+    for (let row = 1; row <= range.e.r; row++) {
+      const cellRef = xlsx.utils.encode_cell({ r: row, c: 4 });
+      const cell = worksheet[cellRef];
+      if (cell && cell.v && typeof cell.v === 'string') {
+        const name = cell.v.trim();
+        if (name !== '' && !['trimmed zoho name', 'name', 'agent name'].includes(name.toLowerCase())) {
+          agentsList.push({
+            name,
+            role: "Item Review",
+            capacity: 30, // Updated capacity to 30
+          });
+        }
+      }
+    }
+    console.log(`Read ${agentsList.length} agents from Excel roster (column E)`);
+    return agentsList;
   } catch (error) {
-    console.error('MongoDB Connection Error:', error);
-    return false;
+    console.error('Error reading Excel roster:', error);
+    return [];
   }
-};
+}
 
-// Comprehensive Data Loading Function
+// ------------------------------
+// Load Data into MongoDB
+// ------------------------------
 async function loadData() {
   await ensureDataDir();
 
-  // Load Agents
-  let agentsFromDB = await Agent.find();
-  if (agentsFromDB.length === 0) {
-    console.log('No agents in database, attempting to load from sources');
-    
+  // Load agents: If none exist in MongoDB, import from Excel
+  const agentCount = await Agent.countDocuments();
+  if (agentCount === 0) {
+    console.log('No agents found in MongoDB, importing from Excel roster...');
     const excelAgents = await readRosterExcel();
-    const agentsToSave = excelAgents.length > 0 ? excelAgents : createSampleAgents();
-    
-    await Agent.insertMany(agentsToSave);
-    agentsFromDB = agentsToSave;
-    console.log(`Saved ${agentsFromDB.length} agents to database`);
+    if (excelAgents.length > 0) {
+      await Agent.insertMany(excelAgents);
+      console.log(`Imported ${excelAgents.length} agents from Excel roster`);
+    } else {
+      const sampleAgents = [
+        { name: "Agent Sample 1", role: "Item Review", capacity: 30 },
+        { name: "Agent Sample 2", role: "Item Review", capacity: 30 }
+      ];
+      await Agent.insertMany(sampleAgents);
+      console.log('Inserted sample agents');
+    }
   }
 
-  // Load Products
-  let productsFromDB = await Product.find();
-  if (productsFromDB.length === 0) {
-    console.log('No products in database, attempting to load from sources');
-    
-    const csvProducts = await readOutputCsv();
-    const productsToSave = csvProducts.length > 0 ? csvProducts : createSampleProducts();
-    
-    await Product.insertMany(productsToSave);
-    productsFromDB = productsToSave;
-    console.log(`Saved ${productsFromDB.length} products to database`);
+  // Load products: If none exist, import from CSV
+  const productCount = await Product.countDocuments();
+  if (productCount === 0) {
+    console.log('No products found in MongoDB, importing from CSV...');
+    const csvRows = await readOutputCsv();
+    let csvProducts = csvRows.map(row => ({
+      id: row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id,
+      name: row.product_name || "",
+      priority: row.rule_priority || row.priority,
+      tenantId: row.tenant_id,
+      createdOn: row.oldest_created_on || row.sys_created_on || row.created_on,
+      count: row.count,
+      assigned: false
+    }));
+    csvProducts = csvProducts.filter(p => p.id);
+    if (csvProducts.length > 0) {
+      await Product.insertMany(csvProducts);
+      console.log(`Imported ${csvProducts.length} products from CSV`);
+    }
   }
+
+  // Assignments will be managed in MongoDB; no initial load required.
+  console.log('Data load complete');
 }
 
+// ------------------------------
 // API Routes
-app.get('/', (req, res) => {
-  res.json({ 
-    message: 'Product Assignment Server is running',
-    endpoints: [
-      '/api/agents',
-      '/api/products',
-      '/api/assignments'
-    ]
-  });
-});
+// ------------------------------
+app.get('/', (req, res) => { res.send('Product Assignment Server is running'); });
 
-app.get('/api/agents', async (req, res) => {
+app.get('/api/agents', async (req, res) => { 
   try {
     const agents = await Agent.find();
     res.json(agents);
   } catch (error) {
-    console.error('Error fetching agents:', error);
-    res.status(500).json({ error: 'Failed to fetch agents' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/api/products', async (req, res) => {
+app.get('/api/products', async (req, res) => { 
   try {
     const products = await Product.find();
     res.json(products);
   } catch (error) {
-    console.error('Error fetching products:', error);
-    res.status(500).json({ error: 'Failed to fetch products' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/api/assignments', async (req, res) => {
+app.get('/api/assignments', async (req, res) => { 
   try {
     const assignments = await Assignment.find();
     res.json(assignments);
   } catch (error) {
-    console.error('Error fetching assignments:', error);
-    res.status(500).json({ error: 'Failed to fetch assignments' });
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Error Handling Middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ 
-    error: 'Something went wrong!',
-    details: err.message 
-  });
+// Completed assignments endpoint
+app.get('/api/completed-assignments', async (req, res) => {
+  try {
+    const completed = await Assignment.find({ completed: true });
+    res.json(completed);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// Server Startup
-async function startServer() {
+// Unassigned products endpoint
+app.get('/api/unassigned-products', async (req, res) => {
   try {
-    // Connect to MongoDB
-    await connectDB();
-    
-    // Load initial data
+    const unassigned = await Product.find({ assigned: false });
+    res.json(unassigned);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Previously assigned endpoint
+app.get('/api/previously-assigned', async (req, res) => {
+  try {
+    const prev = await Assignment.find({ $or: [ { completed: true }, { unassignedTime: { $exists: true } } ] });
+    const result = [];
+    for (const a of prev) {
+      const product = await Product.findOne({ id: a.productId });
+      result.push({
+        id: product ? product.id : a.productId,
+        count: product ? product.count : '',
+        tenantId: product ? product.tenantId : '',
+        priority: product ? product.priority : '',
+        createdOn: product ? product.createdOn : '',
+        unassignedTime: a.unassignedTime || '',
+        unassignedBy: a.unassignedBy || ''
+      });
+    }
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Queue endpoint: return all products
+app.get('/api/queue', async (req, res) => {
+  try {
+    const products = await Product.find();
+    res.json(products);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// File Upload Endpoint (Merge CSV)
+app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => {
+  try {
+    console.log('File upload received:', req.file);
+    const newData = await new Promise((resolve, reject) => {
+      const results = [];
+      createReadStream(req.file.path)
+        .pipe(csvParser())
+        .on('data', (row) => results.push(row))
+        .on('end', () => resolve(results))
+        .on('error', reject);
+    });
+    let existingData = [];
+    if (await fileExists(OUTPUT_CSV)) {
+      existingData = await new Promise((resolve, reject) => {
+        const results = [];
+        createReadStream(OUTPUT_CSV)
+          .pipe(csvParser())
+          .on('data', (row) => results.push(row))
+          .on('end', () => resolve(results))
+          .on('error', reject);
+      });
+    }
+    const mergedDataMap = new Map();
+    existingData.forEach(row => {
+      const key = row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id;
+      if (key) mergedDataMap.set(key, row);
+    });
+    newData.forEach(row => {
+      const key = row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id;
+      if (key) {
+        mergedDataMap.set(key, row);
+      }
+    });
+    const mergedData = Array.from(mergedDataMap.values());
+    const ws = createWriteStream(OUTPUT_CSV);
+    const csvStream = format({ headers: true });
+    csvStream.pipe(ws);
+    mergedData.forEach(row => csvStream.write(row));
+    csvStream.end();
+    await fs.unlink(req.file.path);
+    // Update products in MongoDB based on merged CSV
+    let csvProducts = mergedData.map(row => ({
+      id: row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id,
+      name: row.product_name || "",
+      priority: row.rule_priority || row.priority,
+      tenantId: row.tenant_id,
+      createdOn: row.oldest_created_on || row.sys_created_on || row.created_on,
+      count: row.count,
+      assigned: false
+    }));
+    csvProducts = csvProducts.filter(p => p.id);
+    for (const prod of csvProducts) {
+      await Product.findOneAndUpdate({ id: prod.id }, prod, { upsert: true, new: true });
+    }
+    res.status(200).json({ message: 'Output CSV uploaded and merged successfully. Data refreshed.' });
+  } catch (error) {
+    console.error('Error uploading output CSV:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Refresh endpoint
+app.post('/api/refresh', async (req, res) => {
+  try {
     await loadData();
-    
-    // Start Express server
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`Server running on port ${PORT}`);
-      console.log(`Listening on all network interfaces`);
+    res.status(200).json({ message: 'Data refreshed successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to refresh data' });
+  }
+});
+
+// ------------------------------
+// Task Assignment and Completion Endpoints
+// ------------------------------
+let assignmentInProgress = false;
+
+// Assign endpoint: assign an available product to the specified agent
+app.post('/api/assign', async (req, res) => {
+  if (assignmentInProgress) {
+    return res.status(409).json({ error: 'Another assignment is in progress, please try again later' });
+  }
+  assignmentInProgress = true;
+  try {
+    const { agentId } = req.body;
+    if (!agentId) {
+      assignmentInProgress = false;
+      return res.status(400).json({ error: 'Agent ID is required' });
+    }
+    const agent = await Agent.findById(agentId);
+    if (!agent) {
+      assignmentInProgress = false;
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+    const activeCount = await Assignment.countDocuments({ agentId: agent._id, completed: false, unassignedTime: { $exists: false } });
+    if (activeCount >= agent.capacity) {
+      assignmentInProgress = false;
+      return res.status(400).json({ error: 'Agent has reached maximum capacity' });
+    }
+    const assignedProductIds = (await Assignment.find({})).map(a => a.productId);
+    const availableProduct = await Product.findOne({ assigned: false, id: { $nin: assignedProductIds } }).sort({ createdOn: 1 });
+    if (!availableProduct) {
+      assignmentInProgress = false;
+      return res.status(404).json({ error: 'No available products to assign' });
+    }
+    availableProduct.assigned = true;
+    await availableProduct.save();
+    const newAssignment = await Assignment.create({
+      agentId: agent._id,
+      productId: availableProduct.id,
+      assignedOn: new Date().toISOString().replace('T', ' ').substring(0, 19),
+      completed: false
+    });
+    assignmentInProgress = false;
+    res.status(200).json({
+      message: `Task ${availableProduct.id} assigned to ${agent.name}`,
+      assignment: newAssignment
     });
   } catch (error) {
-    console.error('Server startup failed:', error);
-    process.exit(1);
+    assignmentInProgress = false;
+    res.status(500).json({ error: `Server error: ${error.message}` });
   }
-}
+});
 
-// Initialize Server
-startServer();
-
-// Graceful Shutdown
-process.on('SIGINT', async () => {
-  console.log('Shutting down gracefully');
+// Complete endpoint: mark a specific task as completed
+app.post('/api/complete', async (req, res) => {
   try {
-    await mongoose.connection.close();
-    process.exit(0);
+    const { agentId, productId } = req.body;
+    if (!agentId || !productId) {
+      return res.status(400).json({ error: 'agentId and productId are required' });
+    }
+    const agent = await Agent.findById(agentId);
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+    const assignment = await Assignment.findOne({ agentId: agent._id, productId, completed: false, unassignedTime: { $exists: false } });
+    if (!assignment) {
+      return res.status(404).json({ error: 'Active assignment not found' });
+    }
+    assignment.completed = true;
+    assignment.completedOn = new Date().toISOString().replace('T', ' ').substring(0, 19);
+    await assignment.save();
+    const product = await Product.findOne({ id: productId });
+    if (product) {
+      product.assigned = false;
+      await product.save();
+    }
+    res.status(200).json({ message: `Task ${productId} completed by ${agent.name}` });
   } catch (error) {
-    console.error('Error during shutdown:', error);
-    process.exit(1);
+    res.status(500).json({ error: `Server error: ${error.message}` });
   }
+});
+
+// Complete All Tasks endpoint: mark all active tasks for an agent as completed
+app.post('/api/complete-all-agent', async (req, res) => {
+  try {
+    const { agentId } = req.body;
+    if (!agentId) {
+      return res.status(400).json({ error: 'Agent ID is required' });
+    }
+    const agent = await Agent.findById(agentId);
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+    const activeAssignments = await Assignment.find({ agentId: agent._id, completed: false, unassignedTime: { $exists: false } });
+    if (activeAssignments.length === 0) {
+      return res.status(200).json({ message: 'No active tasks to complete for this agent' });
+    }
+    for (const assignment of activeAssignments) {
+      assignment.completed = true;
+      assignment.completedOn = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      await assignment.save();
+      const product = await Product.findOne({ id: assignment.productId });
+      if (product) {
+        product.assigned = false;
+        await product.save();
+      }
+    }
+    res.status(200).json({ message: `Completed all (${activeAssignments.length}) tasks for agent ${agent.name}` });
+  } catch (error) {
+    res.status(500).json({ error: `Server error: ${error.message}` });
+  }
+});
+
+// Unassign a single product: mark the assignment as unassigned
+app.post('/api/unassign-product', async (req, res) => {
+  try {
+    const { productId, agentId } = req.body;
+    if (!productId) {
+      return res.status(400).json({ error: 'Product ID is required' });
+    }
+    const productAssignments = await Assignment.find({ productId, completed: false, unassignedTime: { $exists: false } });
+    if (productAssignments.length === 0) {
+      return res.status(404).json({ error: 'No active assignment found for this product' });
+    }
+    for (const assignment of productAssignments) {
+      const agent = await Agent.findById(assignment.agentId);
+      assignment.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      assignment.unassignedBy = agent ? agent.name : 'Unknown';
+      await assignment.save();
+    }
+    const product = await Product.findOne({ id: productId });
+    if (product) {
+      product.assigned = false;
+      await product.save();
+    }
+    res.status(200).json({ message: `Product ${productId} unassigned successfully` });
+  } catch (error) {
+    res.status(500).json({ error: `Server error: ${error.message}` });
+  }
+});
+
+// Unassign all tasks from a specific agent
+app.post('/api/unassign-agent', async (req, res) => {
+  try {
+    const { agentId } = req.body;
+    if (!agentId) {
+      return res.status(400).json({ error: 'Agent ID is required' });
+    }
+    const agent = await Agent.findById(agentId);
+    if (!agent) {
+      return res.status(404).json({ error: 'Agent not found' });
+    }
+    const activeAssignments = await Assignment.find({ agentId: agent._id, completed: false, unassignedTime: { $exists: false } });
+    if (activeAssignments.length === 0) {
+      return res.status(200).json({ message: 'Agent has no tasks to unassign' });
+    }
+    for (const assignment of activeAssignments) {
+      assignment.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      assignment.unassignedBy = agent.name;
+      await assignment.save();
+      const product = await Product.findOne({ id: assignment.productId });
+      if (product) {
+        product.assigned = false;
+        await product.save();
+      }
+    }
+    res.status(200).json({ message: `Unassigned ${activeAssignments.length} tasks from agent ${agent.name}` });
+  } catch (error) {
+    res.status(500).json({ error: `Server error: ${error.message}` });
+  }
+});
+
+// Unassign all tasks from all agents
+app.post('/api/unassign-all', async (req, res) => {
+  try {
+    const activeAssignments = await Assignment.find({ completed: false, unassignedTime: { $exists: false } });
+    for (const assignment of activeAssignments) {
+      assignment.unassignedTime = new Date().toISOString().replace('T', ' ').substring(0, 19);
+      const agent = await Agent.findById(assignment.agentId);
+      assignment.unassignedBy = agent ? agent.name : 'Unknown';
+      await assignment.save();
+      const product = await Product.findOne({ id: assignment.productId });
+      if (product) {
+        product.assigned = false;
+        await product.save();
+      }
+    }
+    res.status(200).json({ message: `Unassigned ${activeAssignments.length} tasks from all agents` });
+  } catch (error) {
+    res.status(500).json({ error: `Server error: ${error.message}` });
+  }
+});
+
+// ------------------------------
+// CSV Download Endpoints
+// ------------------------------
+app.get('/api/download/completed-assignments', async (req, res) => {
+  try {
+    const completed = await Assignment.find({ completed: true });
+    res.setHeader('Content-disposition', 'attachment; filename=completed-tasks.csv');
+    res.setHeader('Content-Type', 'text/csv');
+    const csvStream = format({ headers: true });
+    csvStream.pipe(res);
+    for (const a of completed) {
+      const agent = await Agent.findById(a.agentId);
+      csvStream.write({
+        assignmentId: a._id,
+        agentId: a.agentId,
+        completedBy: agent ? agent.name : 'Unknown',
+        productId: a.productId,
+        assignedOn: a.assignedOn,
+        completedOn: a.completedOn
+      });
+    }
+    csvStream.end();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/download/unassigned-products', async (req, res) => {
+  try {
+    const unassigned = await Product.find({ assigned: false });
+    res.setHeader('Content-disposition', 'attachment; filename=unassigned-products.csv');
+    res.setHeader('Content-Type', 'text/csv');
+    const csvStream = format({ headers: true });
+    csvStream.pipe(res);
+    for (const p of unassigned) {
+      csvStream.write({
+        productId: p.id,
+        priority: p.priority,
+        tenantId: p.tenantId,
+        createdOn: p.createdOn,
+        count: p.count
+      });
+    }
+    csvStream.end();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/download/previously-assigned', async (req, res) => {
+  try {
+    const prev = await Assignment.find({ $or: [ { completed: true }, { unassignedTime: { $exists: true } } ] });
+    const results = [];
+    for (const a of prev) {
+      const product = await Product.findOne({ id: a.productId });
+      results.push({
+        productId: product ? product.id : a.productId,
+        count: product ? product.count : '',
+        tenantId: product ? product.tenantId : '',
+        priority: product ? product.priority : '',
+        createdOn: product ? product.createdOn : '',
+        unassignedTime: a.unassignedTime || '',
+        unassignedBy: a.unassignedBy || ''
+      });
+    }
+    res.setHeader('Content-disposition', 'attachment; filename=previously-assigned.csv');
+    res.setHeader('Content-Type', 'text/csv');
+    const csvStream = format({ headers: true });
+    csvStream.pipe(res);
+    results.forEach(row => csvStream.write(row));
+    csvStream.end();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/download/queue', async (req, res) => {
+  try {
+    const allProducts = await Product.find();
+    res.setHeader('Content-disposition', 'attachment; filename=product-queue.csv');
+    res.setHeader('Content-Type', 'text/csv');
+    const csvStream = format({ headers: true });
+    csvStream.pipe(res);
+    for (const p of allProducts) {
+      csvStream.write({
+        productId: p.id,
+        priority: p.priority,
+        tenantId: p.tenantId,
+        createdOn: p.createdOn,
+        count: p.count,
+        assigned: p.assigned ? "Yes" : "No"
+      });
+    }
+    csvStream.end();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ------------------------------
+// Start the Server
+// ------------------------------
+app.listen(PORT, async () => {
+  console.log(`Server running on port ${PORT}`);
+  await loadData();
+  console.log('Server is ready to handle requests');
 });
