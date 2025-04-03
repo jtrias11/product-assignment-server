@@ -23,5 +23,17 @@
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jtrias11/product-assignment-server.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/jtrias11/product-assignment-server/issues"
+  },
+  "homepage": "https://github.com/jtrias11/product-assignment-server#readme",
+  "description": ""
 }
