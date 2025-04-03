@@ -1,15 +1,16 @@
 /***************************************************************
- * server.js - Final Script with Optimized CSV Upload and 6-Column Mapping
- *
- * Expected CSV Columns (in header row):
+ * server.js - Final Script with Optimized CSV Upload and Task Query
+ * 
+ * Expected CSV Columns (header row):
  *   item.abstract_product_id, abstract_product_id, rule_priority, tenant_id, oldest_created_on, count
- *
+ * 
  * Features:
  * - Connects to MongoDB via MONGO_URI.
  * - Loads agents from "Walmart BH Roster.xlsx" (using column E) if none exist.
  * - Loads products from "output.csv" if none exist.
- * - CSV upload endpoint uses bulkWrite for efficient updates (no fallback UUID generation).
- * - Provides endpoints for refreshing data, task assignment, task completion, unassignment, and CSV downloads.
+ * - CSV upload endpoint uses bulkWrite to efficiently update/insert products.
+ * - The /api/assign endpoint now queries directly for an available product.
+ * - Provides endpoints for refreshing data, task assignment, completion, unassignment, and CSV downloads.
  ***************************************************************/
 
 require('dotenv').config();
@@ -36,22 +37,19 @@ app.use(cors());
 app.use(express.json());
 
 // ------------------------------
-// MongoDB Connection
-// ------------------------------
+// MongoDB Connection (options removed to silence warnings)
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('MongoDB Connected'))
   .catch((error) => console.error('MongoDB Connection Error:', error));
 
 // ------------------------------
 // File Paths and Directories
-// ------------------------------
 const DATA_DIR = path.join(__dirname, 'data');
 const OUTPUT_CSV = path.join(DATA_DIR, 'output.csv');
 const ROSTER_EXCEL = path.join(DATA_DIR, 'Walmart BH Roster.xlsx');
 
 // ------------------------------
 // Multer Configuration
-// ------------------------------
 const storage = multer.diskStorage({
   destination: (req, file, cb) => { cb(null, DATA_DIR); },
   filename: (req, file, cb) => { cb(null, Date.now() + '-' + file.originalname); }
@@ -60,7 +58,6 @@ const upload = multer({ storage });
 
 // ------------------------------
 // Helper Functions
-// ------------------------------
 async function ensureDataDir() {
   try {
     await fs.mkdir(DATA_DIR, { recursive: true });
@@ -69,7 +66,6 @@ async function ensureDataDir() {
     console.error('Error creating data directory:', error);
   }
 }
-
 async function fileExists(filePath) {
   try {
     await fs.access(filePath);
@@ -79,7 +75,7 @@ async function fileExists(filePath) {
   }
 }
 
-// Reads the entire CSV from OUTPUT_CSV (for initial import)
+// Reads the CSV from OUTPUT_CSV for initial import
 async function readInitialCsv() {
   console.log(`Looking for output CSV at: ${OUTPUT_CSV}`);
   if (!(await fileExists(OUTPUT_CSV))) {
@@ -102,7 +98,7 @@ async function readInitialCsv() {
   });
 }
 
-// Reads agents from the Excel roster (using column E)
+// Reads agents from Excel roster (using column E)
 async function readRosterExcel() {
   try {
     if (!(await fileExists(ROSTER_EXCEL))) {
@@ -150,11 +146,10 @@ async function readRosterExcel() {
 
 // ------------------------------
 // Load Data into MongoDB on Startup
-// ------------------------------
 async function loadData() {
   await ensureDataDir();
 
-  // Load agents if none exist
+  // Agents: Import from Excel if none exist.
   const agentCount = await Agent.countDocuments();
   if (agentCount === 0) {
     console.log('No agents found in MongoDB, importing from Excel roster...');
@@ -172,13 +167,12 @@ async function loadData() {
     }
   }
 
-  // Load products if none exist
+  // Products: Import from CSV if none exist.
   const productCount = await Product.countDocuments();
   if (productCount === 0) {
     console.log('No products found in MongoDB, importing from CSV...');
     const csvRows = await readInitialCsv();
     const csvProducts = csvRows.map(row => {
-      // Use either "abstract_product_id" or "item.abstract_product_id" for the product ID.
       const productId = row['abstract_product_id'] || row['item.abstract_product_id'];
       return {
         id: productId,
@@ -298,8 +292,8 @@ app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => 
       createReadStream(req.file.path)
         .pipe(csvParser())
         .on('data', row => {
-          console.log('Row Keys:', Object.keys(row)); // Debug: log keys
-          console.log('Row Data:', row);              // Debug: log full row
+          console.log('Row Keys:', Object.keys(row)); // Debug log
+          console.log('Row Data:', row);              // Debug log
           rows.push(row);
         })
         .on('end', resolve)
@@ -316,12 +310,12 @@ app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => 
           update: {
             $set: {
               id: productId,
-              name: productId, // Derive name from the product ID
+              name: productId,
               priority: row['rule_priority'] || null,
               tenantId: row['tenant_id'] || null,
               createdOn: row['oldest_created_on'] || null,
               count: Number(row['count']) || 1,
-              assigned: false // Reset to unassigned on upload
+              assigned: false
             }
           },
           upsert: true
@@ -340,7 +334,7 @@ app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => 
   }
 });
 
-// Refresh endpoint: reload data from CSV/Excel if needed
+// Refresh endpoint
 app.post('/api/refresh', async (req, res) => {
   try {
     await loadData();
@@ -355,7 +349,7 @@ app.post('/api/refresh', async (req, res) => {
 // ------------------------------
 let assignmentInProgress = false;
 
-// Assign a product to an agent
+// Assign a product to an agent (Optimized: directly query for available product)
 app.post('/api/assign', async (req, res) => {
   if (assignmentInProgress) {
     return res.status(409).json({ error: 'Another assignment is in progress' });
@@ -381,11 +375,8 @@ app.post('/api/assign', async (req, res) => {
       assignmentInProgress = false;
       return res.status(400).json({ error: 'Agent has reached maximum capacity' });
     }
-    const assignedProductIds = (await Assignment.find({})).map(a => a.productId);
-    const availableProduct = await Product.findOne({
-      assigned: false,
-      id: { $nin: assignedProductIds }
-    }).sort({ createdOn: 1 });
+    // Directly query for an available product (using assigned flag)
+    const availableProduct = await Product.findOne({ assigned: false }).sort({ createdOn: 1 });
     if (!availableProduct) {
       assignmentInProgress = false;
       return res.status(404).json({ error: 'No available products to assign' });
