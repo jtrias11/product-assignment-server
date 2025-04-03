@@ -3,18 +3,17 @@
  * 
  * Features:
  * - Connects to MongoDB using Mongoose.
- * - Loads agents from "Walmart BH Roster.xlsx" (column E) if the Agent collection is empty.
+ * - Loads agents from "Walmart BH Roster.xlsx" (using column E) if the Agent collection is empty.
  * - Loads products from "output.csv" using the following mappings:
- *     abstract_product_id -> Abstract ID
- *     product_name -> Name
- *     rule_priority (or priority) -> Rule Priority
- *     tenant_id -> Tenant ID
- *     oldest_created_on (or sys_created_on/created_on) -> Created On
- *     count -> Count
+ *     - Product ID: from item.abstract_product_id, abstract_product_id, or product_id.
+ *     - Product Name: from product_name or fallback to abstract_product_id.
+ *     - Priority: from rule_priority (or priority).
+ *     - Tenant ID: from tenant_id.
+ *     - Created On: from oldest_created_on (or sys_created_on/created_on).
+ *     - Count: from count.
  * - Provides endpoints to refresh data, upload CSV (merging data), assign tasks,
- *   complete tasks (including complete all tasks per agent),
- *   unassign tasks (marks them as unassigned),
- *   and download CSVs for completed, unassigned, and full queue.
+ *   complete tasks (including complete all tasks per agent), unassign tasks,
+ *   and download CSVs for completed, unassigned, and the full queue.
  ***************************************************************/
 
 require('dotenv').config();
@@ -184,14 +183,15 @@ async function loadData() {
     }
   }
 
-  // Load products: If none exist, import from CSV using expected columns
+  // Load products: If none exist, import from CSV using expected columns.
+  // Note: If the CSV doesn't include a 'product_name' column, the product name is derived from 'abstract_product_id'.
   const productCount = await Product.countDocuments();
   if (productCount === 0) {
     console.log('No products found in MongoDB, importing from CSV...');
     const csvRows = await readOutputCsv();
     let csvProducts = csvRows.map(row => ({
       id: row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id,
-      name: row.product_name || "",
+      name: row.product_name || row.abstract_product_id || "Unnamed Product",
       priority: row.rule_priority || row.priority,
       tenantId: row.tenant_id,
       createdOn: row.oldest_created_on || row.sys_created_on || row.created_on,
@@ -336,7 +336,7 @@ app.post('/api/upload-output', upload.single('outputFile'), async (req, res) => 
     // Update products in MongoDB based on merged CSV
     let csvProducts = mergedData.map(row => ({
       id: row.abstract_product_id || row.item_abstract_product_id || row['item.abstract_product_id'] || row.product_id,
-      name: row.product_name || "",
+      name: row.product_name || row.abstract_product_id || "Unnamed Product",
       priority: row.rule_priority || row.priority,
       tenantId: row.tenant_id,
       createdOn: row.oldest_created_on || row.sys_created_on || row.created_on,
